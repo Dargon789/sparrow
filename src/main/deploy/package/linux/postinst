@@ -1,0 +1,49 @@
+#!/bin/sh
+# postinst script for sparrow
+#
+# see: dh_installdeb(1)
+
+set -e
+
+# summary of how this script can be called:
+#        * <postinst> `configure' <most-recently-configured-version>
+#        * <old-postinst> `abort-upgrade' <new version>
+#        * <conflictor's-postinst> `abort-remove' `in-favour' <package>
+#          <new-version>
+#        * <postinst> `abort-remove'
+#        * <deconfigured's-postinst> `abort-deconfigure' `in-favour'
+#          <failed-install-package> <version> `removing'
+#          <conflicting-package> <version>
+# for details, see https://www.debian.org/doc/debian-policy/ or
+# the debian-policy package
+
+package_type=deb
+
+
+case "$1" in
+    configure)
+        xdg-desktop-menu install /opt/sparrow/lib/sparrow-Sparrow.desktop
+        xdg-mime install /opt/sparrow/lib/sparrow-Sparrow-MimeInfo.xml
+        install -D -m 644 /opt/sparrow/lib/runtime/conf/udev/*.rules /etc/udev/rules.d
+        if ! getent group plugdev > /dev/null; then
+            groupadd plugdev
+        fi
+        if ! groups "${SUDO_USER:-$(whoami)}" | grep -q plugdev; then
+            usermod -aG plugdev "${SUDO_USER:-$(whoami)}"
+        fi
+        if [ -w /sys/devices ] && [ -w /sys/kernel/uevent_seqnum ] && [ -x /bin/udevadm ]; then
+            /bin/udevadm control --reload
+            /bin/udevadm trigger
+        fi
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+    ;;
+esac
+
+exit 0

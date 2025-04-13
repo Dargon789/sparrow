@@ -1108,6 +1108,31 @@ public class AppServices {
         return wallet;
     }
 
+    public static boolean disallowAnyInvalidDerivationPaths(Wallet wallet) {
+        Optional<ScriptType> optInvalidScriptType = wallet.getKeystores().stream()
+                .filter(keystore -> keystore.getKeyDerivation() != null)
+                .map(keystore -> wallet.getOtherScriptTypeMatchingDerivation(keystore.getKeyDerivation().getDerivationPath()))
+                .filter(Optional::isPresent).map(Optional::get).findFirst();
+        if(optInvalidScriptType.isPresent()) {
+            ScriptType invalidScriptType = optInvalidScriptType.get();
+            boolean includePolicyType = !wallet.getScriptType().getAllowedPolicyTypes().getFirst().equals(invalidScriptType.getAllowedPolicyTypes().getFirst());
+            Optional<ButtonType> optType = AppServices.showWarningDialog("Invalid derivation path", "This wallet is using the derivation path for " +
+                    invalidScriptType.getDescription(includePolicyType) + ", instead of the derivation path for its defined script type of " + wallet.getScriptType().getDescription(includePolicyType) +
+                    ". \n\nDisable derivation path validation to import this wallet?", ButtonType.NO, ButtonType.YES);
+            if(optType.isPresent()) {
+                if(optType.get() == ButtonType.YES) {
+                    Config.get().setValidateDerivationPaths(false);
+                    System.setProperty(Wallet.ALLOW_DERIVATIONS_MATCHING_OTHER_SCRIPT_TYPES_PROPERTY, Boolean.toString(true));
+                    System.setProperty(Wallet.ALLOW_DERIVATIONS_MATCHING_OTHER_NETWORKS_PROPERTY, Boolean.toString(true));
+                } else {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public static final List<Network> WHIRLPOOL_NETWORKS = List.of(Network.MAINNET, Network.TESTNET);
 
     public static boolean isWhirlpoolCompatible(Wallet wallet) {
@@ -1123,7 +1148,8 @@ public class AppServices {
     public static boolean isWhirlpoolPostmixCompatible(Wallet wallet) {
         return WHIRLPOOL_NETWORKS.contains(Network.get())
                 && wallet.getScriptType() != ScriptType.P2TR    //Taproot not yet supported
-                && wallet.getKeystores().size() == 1;
+                && wallet.getKeystores().size() == 1
+                && wallet.getKeystores().getFirst().getWalletModel() != WalletModel.BITBOX_02; //BitBox02 does not support high account numbers
     }
 
     public static List<Wallet> addWhirlpoolWallets(Wallet decryptedWallet, String walletId, Storage storage) {

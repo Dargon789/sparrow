@@ -1,16 +1,20 @@
 package com.sparrowwallet.sparrow.control;
 
 import com.sparrowwallet.drongo.wallet.BlockTransactionHash;
+import com.sparrowwallet.drongo.wallet.Persistable;
 import com.sparrowwallet.sparrow.wallet.Entry;
+import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.property.IntegerProperty;
 import javafx.beans.property.SimpleIntegerProperty;
 import javafx.event.Event;
+import javafx.geometry.Point2D;
 import javafx.scene.control.*;
 import javafx.scene.control.cell.TextFieldTreeTableCell;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.DataFormat;
+import javafx.util.Duration;
 import javafx.util.converter.DefaultStringConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,12 +38,23 @@ class LabelCell extends TextFieldTreeTableCell<Entry, String> implements Confirm
         if(empty) {
             setText(null);
             setGraphic(null);
+            setTooltip(null);
         } else {
             Entry entry = getTreeTableView().getTreeItem(getIndex()).getValue();
             EntryCell.applyRowStyles(this, entry);
 
             setText(label);
             setContextMenu(new LabelContextMenu(entry, label));
+
+            double width = label == null || label.length() < 20 ? 0.0 : TextUtils.computeTextWidth(getFont(), label, 0.0D);
+            if(width > getTableColumn().getWidth()) {
+                Tooltip tooltip = new Tooltip(label);
+                tooltip.setMaxWidth(getTreeTableView().getWidth());
+                tooltip.setWrapText(true);
+                setTooltip(tooltip);
+            } else {
+                setTooltip(null);
+            }
         }
     }
 
@@ -47,6 +62,20 @@ class LabelCell extends TextFieldTreeTableCell<Entry, String> implements Confirm
     public void commitEdit(String label) {
         if(label != null) {
             label = label.trim();
+            if(label.length() > Persistable.MAX_LABEL_LENGTH) {
+                label = label.substring(0, Persistable.MAX_LABEL_LENGTH);
+                Platform.runLater(() -> {
+                    Point2D p = this.localToScene(0.0, 0.0);
+                    final Tooltip truncateTooltip = new Tooltip();
+                    truncateTooltip.setText("Labels are truncated at " + Persistable.MAX_LABEL_LENGTH + " characters");
+                    truncateTooltip.setAutoHide(true);
+                    truncateTooltip.show(this, p.getX() + this.getScene().getX() + this.getScene().getWindow().getX() + this.getHeight(),
+                            p.getY() + this.getScene().getY() + this.getScene().getWindow().getY() + this.getHeight());
+                    PauseTransition pt = new PauseTransition(Duration.millis(2000));
+                    pt.setOnFinished(_ -> truncateTooltip.hide());
+                    pt.play();
+                });
+            }
         }
 
         // This block is necessary to support commit on losing focus, because
@@ -103,7 +132,7 @@ class LabelCell extends TextFieldTreeTableCell<Entry, String> implements Confirm
         return confirmationsProperty;
     }
 
-    private static class LabelContextMenu extends ContextMenu {
+    private class LabelContextMenu extends ContextMenu {
         public LabelContextMenu(Entry entry, String label) {
             MenuItem copyLabel = new MenuItem("Copy Label");
             copyLabel.setOnAction(AE -> {
@@ -123,6 +152,13 @@ class LabelCell extends TextFieldTreeTableCell<Entry, String> implements Confirm
                 }
             });
             getItems().add(pasteLabel);
+
+            MenuItem editLabel = new MenuItem("Edit Label...");
+            editLabel.setOnAction(AE -> {
+                hide();
+                startEdit();
+            });
+            getItems().add(editLabel);
         }
     }
 }

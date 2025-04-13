@@ -460,7 +460,7 @@ public class EntryCell extends TreeTableCell<Entry, Entry> implements Confirmati
             Double feeRate = transactionEntry.getBlockTransaction().getFeeRate();
             Long vSizefromTip = transactionEntry.getVSizeFromTip();
             if(feeRate != null && vSizefromTip != null) {
-                long blocksFromTip = (long)Math.ceil((double)vSizefromTip / Transaction.MAX_BLOCK_SIZE);
+                long blocksFromTip = (long)Math.ceil((double)vSizefromTip / Transaction.MAX_BLOCK_SIZE_VBYTES);
 
                 String amount = vSizefromTip + " vB";
                 if(vSizefromTip > 1000 * 1000) {
@@ -806,7 +806,7 @@ public class EntryCell extends TreeTableCell<Entry, Entry> implements Confirmati
         cell.getStyleClass().remove("utxo-row");
         cell.getStyleClass().remove("unconfirmed-row");
         cell.getStyleClass().remove("summary-row");
-        cell.getStyleClass().remove("address-cell");
+        boolean addressCell = cell.getStyleClass().remove("address-cell");
         cell.getStyleClass().remove("hashindex-row");
         cell.getStyleClass().remove("confirming");
         cell.getStyleClass().remove("negative-amount");
@@ -825,7 +825,7 @@ public class EntryCell extends TreeTableCell<Entry, Entry> implements Confirmati
                         confirmationsListener.getConfirmationsProperty().unbind();
                     }
                 }
-                if(OsType.getCurrent() == OsType.MACOS && transactionEntry.getBlockTransaction().getHeight() > 0) {
+                if(OsType.getCurrent() == OsType.MACOS && transactionEntry.getBlockTransaction().getHeight() > 0 && !cell.getStyleClass().contains("label-cell")) {
                     cell.getStyleClass().add("number-field");
                 }
             } else if(entry instanceof NodeEntry) {
@@ -835,7 +835,7 @@ public class EntryCell extends TreeTableCell<Entry, Entry> implements Confirmati
                 if(!utxoEntry.isSpendable()) {
                     cell.getStyleClass().add("unspendable");
                 }
-                if(OsType.getCurrent() == OsType.MACOS && utxoEntry.getHashIndex().getHeight() > 0) {
+                if(OsType.getCurrent() == OsType.MACOS && utxoEntry.getHashIndex().getHeight() > 0 && !addressCell && !cell.getStyleClass().contains("label-cell")) {
                     cell.getStyleClass().add("number-field");
                 }
             } else if(entry instanceof HashIndexEntry hashIndexEntry) {

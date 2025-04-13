@@ -594,6 +594,13 @@ public class WalletForm {
     }
 
     @Subscribe
+    public void walletTableChanged(WalletTableChangedEvent event) {
+        if(event.getWallet() == wallet && event.getTableType() != null) {
+            Platform.runLater(() -> EventManager.get().post(new WalletDataChangedEvent(wallet)));
+        }
+    }
+
+    @Subscribe
     public void walletMixConfigChanged(WalletMixConfigChangedEvent event) {
         if(event.getWallet() == wallet) {
             Platform.runLater(() -> EventManager.get().post(new WalletDataChangedEvent(wallet)));
@@ -637,6 +644,13 @@ public class WalletForm {
             if(!newNodes.isEmpty()) {
                 Platform.runLater(() -> refreshHistory(AppServices.getCurrentBlockHeight(), newNodes));
             }
+        }
+    }
+
+    @Subscribe
+    public void keystoreDeviceRegistrationsChanged(KeystoreDeviceRegistrationsChangedEvent event) {
+        if(event.getWallet() == wallet) {
+            Platform.runLater(() -> EventManager.get().post(new WalletDataChangedEvent(wallet)));
         }
     }
 
