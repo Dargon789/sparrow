@@ -3,6 +3,7 @@ package com.sparrowwallet.sparrow.control;
 import com.sparrowwallet.drongo.wallet.Bip39MnemonicCode;
 import com.sparrowwallet.drongo.wallet.DeterministicSeed;
 import com.sparrowwallet.drongo.wallet.MnemonicException;
+import com.sparrowwallet.drongo.wallet.WalletModel;
 import com.sparrowwallet.drongo.wallet.slip39.Slip39MnemonicCode;
 import com.sparrowwallet.sparrow.AppServices;
 import com.sparrowwallet.sparrow.glyphfont.GlyphUtils;
@@ -51,8 +52,8 @@ public class MnemonicKeystorePane extends TitledDescriptionPane {
     protected final SimpleStringProperty passphraseProperty = new SimpleStringProperty("");
     protected IntegerProperty defaultWordSizeProperty;
 
-    public MnemonicKeystorePane(String title, String description, String content, String imageUrl) {
-        super(title, description, content, imageUrl);
+    public MnemonicKeystorePane(String title, String description, String content, WalletModel walletModel) {
+        super(title, description, content, walletModel);
     }
 
     @Override
@@ -320,6 +321,7 @@ public class MnemonicKeystorePane extends TitledDescriptionPane {
                 }
             };
             wordField.setMaxWidth(100);
+            wordField.setAccessibleText("Word " + (wordNumber + 1));
             TextFormatter<?> formatter = new TextFormatter<>((TextFormatter.Change change) -> {
                 String text = change.getText();
                 // if text was added, fix the text to fit the requirements

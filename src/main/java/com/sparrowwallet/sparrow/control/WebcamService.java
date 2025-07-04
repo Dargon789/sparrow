@@ -27,6 +27,9 @@ import java.awt.image.BufferedImage;
 import java.awt.image.WritableRaster;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -34,13 +37,18 @@ import java.util.stream.Stream;
 public class WebcamService extends ScheduledService<Image> {
     private static final Logger log = LoggerFactory.getLogger(WebcamService.class);
 
+    private final Semaphore taskSemaphore = new Semaphore(1);
+    private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+    private final AtomicBoolean captureClosed = new AtomicBoolean(false);
+
     private List<CaptureDevice> devices;
+    private List<CaptureDevice> availableDevices;
     private Set<WebcamResolution> resolutions;
 
     private WebcamResolution resolution;
     private CaptureDevice device;
     private final BooleanProperty opening = new SimpleBooleanProperty(false);
-    private final BooleanProperty closed = new SimpleBooleanProperty(false);
+    private final BooleanProperty opened = new SimpleBooleanProperty(false);
 
     private final ObjectProperty<Result> resultProperty = new SimpleObjectProperty<>(null);
 
@@ -105,26 +113,40 @@ public class WebcamService extends ScheduledService<Image> {
         return new Task<>() {
             @Override
             protected Image call() throws Exception {
+                if(cancelRequested.get() || isCancelled() || captureClosed.get()) {
+                    return null;
+                }
+
+                if(!taskSemaphore.tryAcquire()) {
+                    log.warn("Skipped execution of webcam capture task, another task is running");
+                    return null;
+                }
+
                 try {
-                    if(stream == null) {
+                    if(devices == null) {
                         devices = capture.getDevices();
+                        availableDevices = new ArrayList<>(devices);
 
                         if(devices.isEmpty()) {
                             throw new UnsupportedOperationException("No cameras available");
                         }
+                    }
 
-                        CaptureDevice selectedDevice = devices.stream().filter(d -> !d.getFormats().isEmpty()).findFirst().orElse(devices.getFirst());
+                    while(stream == null && !availableDevices.isEmpty()) {
+                        CaptureDevice selectedDevice = availableDevices.stream().filter(d -> !d.getFormats().isEmpty()).findFirst().orElse(availableDevices.getFirst());
 
                         if(device != null) {
-                            for(CaptureDevice webcam : devices) {
+                            for(CaptureDevice webcam : availableDevices) {
                                 if(webcam.getName().equals(device.getName())) {
                                     selectedDevice = webcam;
+                                    break;
                                 }
                             }
                         } else if(Config.get().getWebcamDevice() != null) {
-                            for(CaptureDevice webcam : devices) {
+                            for(CaptureDevice webcam : availableDevices) {
                                 if(webcam.getName().equals(Config.get().getWebcamDevice())) {
                                     selectedDevice = webcam;
+                                    break;
                                 }
                             }
                         }
@@ -163,22 +185,35 @@ public class WebcamService extends ScheduledService<Image> {
                             }
                         }
 
+                        //On Linux, formats not defined in WebcamPixelFormat are unsupported
+                        if(OsType.getCurrent() == OsType.UNIX && WebcamPixelFormat.fromFourCC(format.getFormatInfo().fourcc) == null) {
+                            log.warn("Unsupported camera pixel format " + WebcamPixelFormat.fourCCToString(format.getFormatInfo().fourcc));
+                        }
+
                         if(log.isDebugEnabled()) {
-                            log.debug("Opening capture stream  on " + device + " with format " + format.getFormatInfo().width + "x" + format.getFormatInfo().height + " (" + WebcamPixelFormat.fourCCToString(format.getFormatInfo().fourcc) + ")");
+                            log.debug("Opening capture stream on " + device + " with format " + format.getFormatInfo().width + "x" + format.getFormatInfo().height + " (" + WebcamPixelFormat.fourCCToString(format.getFormatInfo().fourcc) + ")");
                         }
 
                         opening.set(true);
                         stream = device.openStream(format);
                         opening.set(false);
-                        closed.set(false);
 
                         try {
                             zoomLimits = stream.getPropertyLimits(CaptureProperty.Zoom);
                         } catch(Throwable e) {
                             log.debug("Error getting zoom limits on " + device + ", assuming no zoom function");
                         }
+
+                        if(stream == null) {
+                            availableDevices.remove(device);
+                        }
                     }
 
+                    if(stream == null) {
+                        throw new UnsupportedOperationException("No usable cameras available, tried " + devices);
+                    }
+
+                    opened.set(true);
                     BufferedImage originalImage = stream.capture();
                     CroppedDimension cropped = getCroppedDimension(originalImage);
                     BufferedImage croppedImage = originalImage.getSubimage(cropped.x, cropped.y, cropped.length, cropped.length);
@@ -195,6 +230,7 @@ public class WebcamService extends ScheduledService<Image> {
                     return image;
                 } finally {
                     opening.set(false);
+                    taskSemaphore.release();
                 }
             }
         };
@@ -204,21 +240,38 @@ public class WebcamService extends ScheduledService<Image> {
     public void reset() {
         stream = null;
         zoomLimits = null;
+        cancelRequested.set(false);
         super.reset();
     }
 
     @Override
     public boolean cancel() {
-        if(stream != null) {
-            stream.close();
-            closed.set(true);
+        cancelRequested.set(true);
+        boolean cancelled = super.cancel();
+
+        try {
+            if(taskSemaphore.tryAcquire(1, TimeUnit.SECONDS)) {
+                taskSemaphore.release();
+            } else {
+                log.error("Timed out waiting for task semaphore to be available to cancel, cancelling anyway");
+            }
+        } catch(InterruptedException e) {
+            log.error("Interrupted while waiting for task semaphore to be available to cancel, cancelling anyway");
         }
 
-        return super.cancel();
+        if(stream != null) {
+            stream.close();
+            opened.set(false);
+        }
+
+        return cancelled;
     }
 
-    public void close() {
-        capture.close();
+    public synchronized void close() {
+        if(!captureClosed.get()) {
+            captureClosed.set(true);
+            capture.close();
+        }
     }
 
     public PropertyLimits getZoomLimits() {
@@ -336,6 +389,10 @@ public class WebcamService extends ScheduledService<Image> {
         return devices;
     }
 
+    public List<CaptureDevice> getAvailableDevices() {
+        return availableDevices;
+    }
+
     public Set<WebcamResolution> getResolutions() {
         return resolutions;
     }
@@ -376,8 +433,12 @@ public class WebcamService extends ScheduledService<Image> {
         return opening;
     }
 
-    public BooleanProperty closedProperty() {
-        return closed;
+    public BooleanProperty openedProperty() {
+        return opened;
+    }
+
+    public boolean getCancelRequested() {
+        return cancelRequested.get();
     }
 
     public static <T extends Enum<T>> T getNearestEnum(T target) {
@@ -385,10 +446,27 @@ public class WebcamService extends ScheduledService<Image> {
     }
 
     public static <T extends Enum<T>> T getNearestEnum(T target, T[] values) {
-        int ordinal = target.ordinal();
-        return Stream.concat(ordinal > 0 ? Stream.of(values[ordinal - 1]) : Stream.empty(), ordinal < values.length - 1 ? Stream.of(values[ordinal + 1]) : Stream.empty())
-                .findFirst()
-                .orElse(null);
+        if(values == null || values.length == 0) {
+            return null;
+        }
+
+        int targetOrdinal = target.ordinal();
+        if(values.length == 1) {
+            return values[0];
+        }
+
+        for(int i = 0; i < values.length; i++) {
+            if(targetOrdinal < values[i].ordinal()) {
+                if(i == 0) {
+                    return values[0];
+                }
+                int diffToPrev = Math.abs(targetOrdinal - values[i - 1].ordinal());
+                int diffToNext = Math.abs(targetOrdinal - values[i].ordinal());
+                return diffToPrev <= diffToNext ? values[i - 1] : values[i];
+            }
+        }
+
+        return values[values.length - 1];
     }
 
     private static class CroppedDimension {

@@ -10,6 +10,7 @@ import com.sparrowwallet.sparrow.EventManager;
 import com.sparrowwallet.sparrow.SparrowWallet;
 import com.sparrowwallet.sparrow.event.MempoolEntriesInitializedEvent;
 import com.sparrowwallet.drongo.Version;
+import com.sparrowwallet.sparrow.net.BlockStats;
 import com.sparrowwallet.sparrow.net.cormorant.Cormorant;
 import com.sparrowwallet.sparrow.net.cormorant.bitcoind.*;
 import com.sparrowwallet.sparrow.net.cormorant.index.TxEntry;
@@ -34,10 +35,11 @@ public class ElectrumServerService {
     }
 
     @JsonRpcMethod("server.version")
-    public List<String> getServerVersion(@JsonRpcParam("client_name") String clientName, @JsonRpcParam("protocol_version") String protocolVersion) throws UnsupportedVersionException {
-        Version clientVersion = new Version(protocolVersion);
+    public List<String> getServerVersion(@JsonRpcParam("client_name") String clientName, @JsonRpcParam("protocol_version") String[] protocolVersion) throws UnsupportedVersionException {
+        String version = protocolVersion.length > 1 ? protocolVersion[1] : protocolVersion[0];
+        Version clientVersion = new Version(version);
         if(clientVersion.compareTo(VERSION) < 0) {
-            throw new UnsupportedVersionException(protocolVersion);
+            throw new UnsupportedVersionException(version);
         }
 
         return List.of(Cormorant.SERVER_NAME + " " + SparrowWallet.APP_VERSION, VERSION.get());
@@ -150,6 +152,17 @@ public class ElectrumServerService {
             }
 
             return bitcoindClient.getBitcoindService().getBlockHeader(blockHash, false);
+        } catch(JsonRpcException e) {
+            throw new BlockNotFoundException(e.getErrorMessage());
+        } catch(IllegalStateException e) {
+            throw new BitcoindIOException(e);
+        }
+    }
+
+    @JsonRpcMethod("blockchain.block.stats")
+    public BlockStats getBlockStats(@JsonRpcParam("height") int height) throws BitcoindIOException, BlockNotFoundException {
+        try {
+            return bitcoindClient.getBitcoindService().getBlockStats(height);
         } catch(JsonRpcException e) {
             throw new BlockNotFoundException(e.getErrorMessage());
         } catch(IllegalStateException e) {

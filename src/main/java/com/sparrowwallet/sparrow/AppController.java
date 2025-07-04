@@ -572,16 +572,16 @@ public class AppController implements Initializable {
 
     public void installUdevRules(ActionEvent event) {
         String commands = """
-                sudo install -m 644 /opt/sparrow/lib/runtime/conf/udev/*.rules /etc/udev/rules.d
+                sudo install -m 644 /opt/sparrowwallet/lib/runtime/conf/udev/*.rules /etc/udev/rules.d
                 sudo udevadm control --reload
                 sudo udevadm trigger
                 sudo groupadd -f plugdev
                 sudo usermod -aG plugdev `whoami`
                 """;
         String home = System.getProperty(JPACKAGE_APP_PATH);
-        if(home != null && !home.startsWith("/opt/sparrow") && home.endsWith("bin/Sparrow")) {
+        if(home != null && !home.startsWith("/opt/sparrowwallet") && home.endsWith("bin/Sparrow")) {
             home = home.replace("bin/Sparrow", "");
-            commands = commands.replace("/opt/sparrow/", home);
+            commands = commands.replace("/opt/sparrowwallet/", home);
         }
 
         TextAreaDialog dialog = new TextAreaDialog(commands, false);
@@ -1034,6 +1034,10 @@ public class AppController implements Initializable {
             cmd.add(System.getProperty(JPACKAGE_APP_PATH));
             cmd.addAll(args.toParams());
             final ProcessBuilder builder = new ProcessBuilder(cmd);
+            if(OsType.getCurrent() == OsType.UNIX) {
+                Map<String, String> env = builder.environment();
+                env.remove("LD_LIBRARY_PATH");
+            }
             builder.start();
             quit(event);
         } catch(Exception e) {
@@ -1422,6 +1426,10 @@ public class AppController implements Initializable {
     }
 
     public void sendToMany(ActionEvent event) {
+        sendToMany(Collections.emptyList());
+    }
+
+    private void sendToMany(List<Payment> initialPayments) {
         if(sendToManyDialog != null) {
             Stage stage = (Stage)sendToManyDialog.getDialogPane().getScene().getWindow();
             stage.setAlwaysOnTop(true);
@@ -1437,7 +1445,7 @@ public class AppController implements Initializable {
                 bitcoinUnit = wallet.getAutoUnit();
             }
 
-            sendToManyDialog = new SendToManyDialog(bitcoinUnit);
+            sendToManyDialog = new SendToManyDialog(bitcoinUnit, initialPayments);
             sendToManyDialog.initModality(Modality.NONE);
             Optional<List<Payment>> optPayments = sendToManyDialog.showAndWait();
             sendToManyDialog = null;
@@ -2634,7 +2642,6 @@ public class AppController implements Initializable {
                     }
                 });
 
-                Image image = new Image("image/sparrow-small.png", 50, 50, false, false);
                 String walletName = event.getWallet().getFullDisplayName();
                 if(walletName.length() > 40) {
                     walletName = walletName.substring(0, 40) + "...";
@@ -2643,10 +2650,10 @@ public class AppController implements Initializable {
                 Notifications notificationBuilder = Notifications.create()
                         .title("Sparrow - " + walletName)
                         .text(text)
-                        .graphic(new ImageView(image))
+                        .graphic(new DialogImage(DialogImage.Type.SPARROW))
                         .hideAfter(Duration.seconds(15))
                         .position(Pos.TOP_RIGHT)
-                        .threshold(5, Notifications.create().title("Sparrow").text("Multiple new wallet transactions").graphic(new ImageView(image)))
+                        .threshold(5, Notifications.create().title("Sparrow").text("Multiple new wallet transactions").graphic(new DialogImage(DialogImage.Type.SPARROW)))
                         .onAction(e -> selectTab(event.getWallet()));
 
                 //If controlsfx can't find our window, we must set the window ourselves (unfortunately notification is then shown within this window)
@@ -3106,6 +3113,11 @@ public class AppController implements Initializable {
         if(tabs.getScene().getWindow().equals(event.getWindow())) {
             verifyDownload(new ActionEvent(event.getFile(), rootStack));
         }
+    }
+
+    @Subscribe
+    public void requestSendToMany(RequestSendToManyEvent event) {
+        sendToMany(event.getPayments());
     }
 
     @Subscribe

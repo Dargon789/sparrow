@@ -13,10 +13,7 @@ import com.sparrowwallet.drongo.crypto.ECKey;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.wallet.*;
-import com.sparrowwallet.sparrow.UnitFormat;
-import com.sparrowwallet.sparrow.AppServices;
-import com.sparrowwallet.sparrow.CurrencyRate;
-import com.sparrowwallet.sparrow.EventManager;
+import com.sparrowwallet.sparrow.*;
 import com.sparrowwallet.sparrow.control.*;
 import com.sparrowwallet.sparrow.event.*;
 import com.sparrowwallet.sparrow.glyphfont.FontAwesome5;
@@ -28,6 +25,7 @@ import com.sparrowwallet.sparrow.paynym.PayNymService;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.*;
 import javafx.beans.value.ChangeListener;
 import javafx.beans.value.ObservableValue;
@@ -79,6 +77,9 @@ public class SendController extends WalletFormController implements Initializabl
     private ToggleButton mempoolSizeToggle;
 
     @FXML
+    private ToggleButton recentBlocksToggle;
+
+    @FXML
     private Field targetBlocksField;
 
     @FXML
@@ -116,6 +117,9 @@ public class SendController extends WalletFormController implements Initializabl
 
     @FXML
     private MempoolSizeFeeRatesChart mempoolSizeFeeRatesChart;
+
+    @FXML
+    private RecentBlocksView recentBlocksView;
 
     @FXML
     private TransactionDiagram transactionDiagram;
@@ -161,6 +165,8 @@ public class SendController extends WalletFormController implements Initializabl
     private final StringProperty utxoLabelSelectionProperty = new SimpleStringProperty("");
 
     private final ObjectProperty<BlockTransaction> replacedTransactionProperty = new SimpleObjectProperty<>(null);
+
+    private final ObjectProperty<FeeRatesSelection> feeRatesSelectionProperty = new SimpleObjectProperty<>(null);
 
     private final List<byte[]> opReturnsList = new ArrayList<>();
 
@@ -299,6 +305,7 @@ public class SendController extends WalletFormController implements Initializabl
         feeRange.valueProperty().addListener(feeRangeListener);
 
         blockTargetFeeRatesChart.managedProperty().bind(blockTargetFeeRatesChart.visibleProperty());
+        blockTargetFeeRatesChart.visibleProperty().bind(Bindings.equal(feeRatesSelectionProperty, FeeRatesSelection.BLOCK_TARGET));
         blockTargetFeeRatesChart.initialize();
         Map<Integer, Double> targetBlocksFeeRates = getTargetBlocksFeeRates();
         if(targetBlocksFeeRates != null) {
@@ -308,20 +315,41 @@ public class SendController extends WalletFormController implements Initializabl
         }
 
         mempoolSizeFeeRatesChart.managedProperty().bind(mempoolSizeFeeRatesChart.visibleProperty());
-        mempoolSizeFeeRatesChart.visibleProperty().bind(blockTargetFeeRatesChart.visibleProperty().not());
+        mempoolSizeFeeRatesChart.visibleProperty().bind(Bindings.equal(feeRatesSelectionProperty, FeeRatesSelection.MEMPOOL_SIZE));
         mempoolSizeFeeRatesChart.initialize();
         Map<Date, Set<MempoolRateSize>> mempoolHistogram = getMempoolHistogram();
         if(mempoolHistogram != null) {
             mempoolSizeFeeRatesChart.update(mempoolHistogram);
         }
 
+        recentBlocksView.managedProperty().bind(recentBlocksView.visibleProperty());
+        recentBlocksView.visibleProperty().bind(Bindings.equal(feeRatesSelectionProperty, FeeRatesSelection.RECENT_BLOCKS));
+        List<BlockSummary> blockSummaries = AppServices.getBlockSummaries().values().stream().sorted().toList();
+        if(!blockSummaries.isEmpty()) {
+            recentBlocksView.update(blockSummaries, AppServices.getNextBlockMedianFeeRate());
+        }
+
+        feeRatesSelectionProperty.addListener((_, oldValue, newValue) -> {
+            boolean isBlockTargetSelection = (newValue == FeeRatesSelection.BLOCK_TARGET);
+            boolean wasBlockTargetSelection = (oldValue == FeeRatesSelection.BLOCK_TARGET || oldValue == null);
+            targetBlocksField.setVisible(isBlockTargetSelection);
+            if(isBlockTargetSelection) {
+                setTargetBlocks(getTargetBlocks(getFeeRangeRate()));
+                updateTransaction();
+            } else if(wasBlockTargetSelection) {
+                setFeeRangeRate(getTargetBlocksFeeRates().get(getTargetBlocks()));
+                updateTransaction();
+            }
+        });
+
         FeeRatesSelection feeRatesSelection = Config.get().getFeeRatesSelection();
-        feeRatesSelection = (feeRatesSelection == null ? FeeRatesSelection.MEMPOOL_SIZE : feeRatesSelection);
+        feeRatesSelection = (feeRatesSelection == null ? FeeRatesSelection.RECENT_BLOCKS : feeRatesSelection);
         cpfpFeeRate.managedProperty().bind(cpfpFeeRate.visibleProperty());
         cpfpFeeRate.setVisible(false);
         setDefaultFeeRate();
-        updateFeeRateSelection(feeRatesSelection);
-        feeSelectionToggleGroup.selectToggle(feeRatesSelection == FeeRatesSelection.BLOCK_TARGET ? targetBlocksToggle : mempoolSizeToggle);
+        feeRatesSelectionProperty.set(feeRatesSelection);
+        feeSelectionToggleGroup.selectToggle(feeRatesSelection == FeeRatesSelection.BLOCK_TARGET ? targetBlocksToggle :
+                (feeRatesSelection == FeeRatesSelection.MEMPOOL_SIZE ? mempoolSizeToggle : recentBlocksToggle));
         feeSelectionToggleGroup.selectedToggleProperty().addListener((observable, oldValue, newValue) -> {
             if(newValue != null) {
                 FeeRatesSelection newFeeRatesSelection = (FeeRatesSelection)newValue.getUserData();
@@ -463,11 +491,35 @@ public class SendController extends WalletFormController implements Initializabl
         validationSupport.setErrorDecorationEnabled(false);
     }
 
-    public Tab addPaymentTab() {
+    public void addPaymentTab() {
+        if(Config.get().getSuggestSendToMany() == null && openSendToMany()) {
+            return;
+        }
+
         Tab tab = getPaymentTab();
         paymentTabs.getTabs().add(tab);
         paymentTabs.getSelectionModel().select(tab);
-        return tab;
+    }
+
+    private boolean openSendToMany() {
+        try {
+            List<Payment> payments = getPayments();
+            if(payments.size() == 3) {
+                ConfirmationAlert confirmationAlert = new ConfirmationAlert("Open Send To Many?", "Open the Tools > Send To Many dialog to add multiple payments?", ButtonType.NO, ButtonType.YES);
+                Optional<ButtonType> optType = confirmationAlert.showAndWait();
+                if(confirmationAlert.isDontAskAgain() && optType.isPresent()) {
+                    Config.get().setSuggestSendToMany(optType.get() == ButtonType.YES);
+                }
+                if(optType.isPresent() && optType.get() == ButtonType.YES) {
+                    Platform.runLater(() -> EventManager.get().post(new RequestSendToManyEvent(payments)));
+                    return true;
+                }
+            }
+        } catch(Exception e) {
+            //ignore
+        }
+
+        return false;
     }
 
     public Tab getPaymentTab() {
@@ -723,24 +775,13 @@ public class SendController extends WalletFormController implements Initializabl
         return List.of(spentTxoFilter, new FrozenTxoFilter(), new CoinbaseTxoFilter(getWalletForm().getWallet()));
     }
 
-    private void updateFeeRateSelection(FeeRatesSelection feeRatesSelection) {
-        boolean blockTargetSelection = (feeRatesSelection == FeeRatesSelection.BLOCK_TARGET);
-        targetBlocksField.setVisible(blockTargetSelection);
-        blockTargetFeeRatesChart.setVisible(blockTargetSelection);
-        if(blockTargetSelection) {
-            setTargetBlocks(getTargetBlocks(getFeeRangeRate()));
-        } else {
-            setFeeRangeRate(getTargetBlocksFeeRates().get(getTargetBlocks()));
-        }
-        updateTransaction();
-    }
-
     private void setDefaultFeeRate() {
         int defaultTarget = TARGET_BLOCKS_RANGE.get((TARGET_BLOCKS_RANGE.size() / 2) - 1);
         int index = TARGET_BLOCKS_RANGE.indexOf(defaultTarget);
         Double defaultRate = getTargetBlocksFeeRates().get(defaultTarget);
         targetBlocks.setValue(index);
         blockTargetFeeRatesChart.select(defaultTarget);
+        recentBlocksView.updateFeeRate(defaultRate);
         setFeeRangeRate(defaultRate);
         setFeeRate(getFeeRangeRate());
         if(Network.get().equals(Network.MAINNET) && defaultRate == getFallbackFeeRate()) {
@@ -964,7 +1005,7 @@ public class SendController extends WalletFormController implements Initializabl
     }
 
     private void setFiatFeeAmount(CurrencyRate currencyRate, Long amount) {
-        if(amount != null && currencyRate != null && currencyRate.isAvailable()) {
+        if(amount != null && currencyRate != null && currencyRate.isAvailable() && Config.get().getExchangeSource() != ExchangeSource.NONE) {
             fiatFeeAmount.set(currencyRate, amount);
         }
     }
@@ -1188,7 +1229,7 @@ public class SendController extends WalletFormController implements Initializabl
 
     public void broadcastNotification(Wallet decryptedWallet) {
         try {
-            PaymentCode paymentCode = decryptedWallet.getPaymentCode();
+            PaymentCode paymentCode = decryptedWallet.isMasterWallet() ? decryptedWallet.getPaymentCode() : decryptedWallet.getMasterWallet().getPaymentCode();
             PaymentCode externalPaymentCode = paymentCodeProperty.get();
             WalletTransaction walletTransaction = walletTransactionProperty.get();
             WalletNode input0Node = walletTransaction.getSelectedUtxos().entrySet().iterator().next().getValue();
@@ -1213,7 +1254,7 @@ public class SendController extends WalletFormController implements Initializabl
             Transaction transaction = psbt.extractTransaction();
 
             ServiceProgressDialog.ProxyWorker proxyWorker = new ServiceProgressDialog.ProxyWorker();
-            ElectrumServer.BroadcastTransactionService broadcastTransactionService = new ElectrumServer.BroadcastTransactionService(transaction);
+            ElectrumServer.BroadcastTransactionService broadcastTransactionService = new ElectrumServer.BroadcastTransactionService(transaction, psbt.getFee());
             broadcastTransactionService.setOnSucceeded(successEvent -> {
                 ElectrumServer.TransactionMempoolService transactionMempoolService = new ElectrumServer.TransactionMempoolService(walletTransaction.getWallet(), transaction.getTxId(), new HashSet<>(walletTransaction.getSelectedUtxos().values()));
                 transactionMempoolService.setDelay(Duration.seconds(2));
@@ -1260,7 +1301,7 @@ public class SendController extends WalletFormController implements Initializabl
                 log.error("Error broadcasting notification transaction", failedEvent.getSource().getException());
                 AppServices.showErrorDialog("Error broadcasting notification transaction", failedEvent.getSource().getException().getMessage());
             });
-            ServiceProgressDialog progressDialog = new ServiceProgressDialog("Broadcast", "Broadcast Notification Transaction", "/image/paynym.png", proxyWorker);
+            ServiceProgressDialog progressDialog = new ServiceProgressDialog("Broadcast", "Broadcast Notification Transaction", new DialogImage(DialogImage.Type.PAYNYM), proxyWorker);
             progressDialog.initOwner(notificationButton.getScene().getWindow());
             AppServices.moveToActiveWindowScreen(progressDialog);
             proxyWorker.setMessage("Broadcasting notification transaction...");
@@ -1395,6 +1436,12 @@ public class SendController extends WalletFormController implements Initializabl
         }
         feeRange.updateTrackHighlight();
 
+        if(event.getNextBlockMedianFeeRate() != null) {
+            recentBlocksView.updateFeeRate(event.getNextBlockMedianFeeRate());
+        } else {
+            recentBlocksView.updateFeeRate(event.getTargetBlockFeeRates());
+        }
+
         if(updateDefaultFeeRate) {
             if(getFeeRate() != null && Long.valueOf((long)getFallbackFeeRate()).equals(getFeeRate().longValue())) {
                 setDefaultFeeRate();
@@ -1411,8 +1458,13 @@ public class SendController extends WalletFormController implements Initializabl
     @Subscribe
     public void feeRateSelectionChanged(FeeRatesSelectionChangedEvent event) {
         if(event.getWallet() == getWalletForm().getWallet()) {
-            updateFeeRateSelection(event.getFeeRateSelection());
+            feeRatesSelectionProperty.set(event.getFeeRateSelection());
         }
+    }
+
+    @Subscribe
+    public void blockSummary(BlockSummaryEvent event) {
+        Platform.runLater(() -> recentBlocksView.update(AppServices.getBlockSummaries().values().stream().sorted().toList(), AppServices.getNextBlockMedianFeeRate()));
     }
 
     @Subscribe
@@ -1497,12 +1549,18 @@ public class SendController extends WalletFormController implements Initializabl
         if(event.getExchangeSource() == ExchangeSource.NONE) {
             fiatFeeAmount.setCurrency(null);
             fiatFeeAmount.setBtcRate(0.0);
+            if(paymentTabs.getTabs().size() > 1) {
+                updateTransaction();
+            }
         }
     }
 
     @Subscribe
     public void exchangeRatesUpdated(ExchangeRatesUpdatedEvent event) {
         setFiatFeeAmount(event.getCurrencyRate(), getFeeValueSats());
+        if(paymentTabs.getTabs().size() > 1) {
+            updateTransaction();
+        }
     }
 
     @Subscribe
@@ -1572,6 +1630,11 @@ public class SendController extends WalletFormController implements Initializabl
         }
     }
 
+    @Subscribe
+    public void feeRateSourceChanged(FeeRatesSourceChangedEvent event) {
+        recentBlocksView.updateFeeRatesSource(event.getFeeRateSource());
+    }
+
     private class PrivacyAnalysisTooltip extends VBox {
         private final List<Label> analysisLabels = new ArrayList<>();
 
@@ -1597,7 +1660,9 @@ public class SendController extends WalletFormController implements Initializabl
                     } else if(payjoinPresent) {
                         addLabel("Cannot fake coinjoin due to payjoin", getInfoGlyph());
                     } else {
-                        if(utxoSelectorProperty().get() != null) {
+                        if(utxoSelectorProperty().get() instanceof MaxUtxoSelector) {
+                            addLabel("Cannot fake coinjoin with max amount selected", getInfoGlyph());
+                        } else if(utxoSelectorProperty().get() != null) {
                             addLabel("Cannot fake coinjoin due to coin control", getInfoGlyph());
                         } else {
                             addLabel("Cannot fake coinjoin due to insufficient funds", getInfoGlyph());

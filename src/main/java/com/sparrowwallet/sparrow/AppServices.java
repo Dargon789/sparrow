@@ -13,6 +13,7 @@ import com.sparrowwallet.drongo.crypto.InvalidPasswordException;
 import com.sparrowwallet.drongo.crypto.Key;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.wallet.*;
+import com.sparrowwallet.sparrow.control.DialogImage;
 import com.sparrowwallet.sparrow.control.WalletPasswordDialog;
 import com.sparrowwallet.sparrow.glyphfont.FontAwesome5;
 import com.sparrowwallet.sparrow.net.Auth47;
@@ -25,6 +26,8 @@ import com.sparrowwallet.sparrow.control.TrayManager;
 import com.sparrowwallet.sparrow.event.*;
 import com.sparrowwallet.sparrow.io.*;
 import com.sparrowwallet.sparrow.net.*;
+import io.reactivex.rxjavafx.schedulers.JavaFxScheduler;
+import io.reactivex.subjects.PublishSubject;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
@@ -42,7 +45,6 @@ import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.control.Dialog;
 import javafx.scene.image.Image;
-import javafx.scene.image.ImageView;
 import javafx.scene.input.KeyCode;
 import javafx.scene.text.Font;
 import javafx.stage.Screen;
@@ -66,6 +68,8 @@ import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static com.sparrowwallet.sparrow.control.DownloadVerifierDialog.*;
@@ -104,6 +108,8 @@ public class AppServices {
 
     private TrayManager trayManager;
 
+    private final PublishSubject<NewBlockEvent> newBlockSubject = PublishSubject.create();
+
     private static Image windowIcon;
 
     private static final BooleanProperty onlineProperty = new SimpleBooleanProperty(false);
@@ -126,7 +132,11 @@ public class AppServices {
 
     private static BlockHeader latestBlockHeader;
 
+    private static final Map<Integer, BlockSummary> blockSummaries = new ConcurrentHashMap<>();
+
     private static Map<Integer, Double> targetBlockFeeRates;
+
+    private static Double nextBlockMedianFeeRate;
 
     private static final TreeMap<Date, Set<MempoolRateSize>> mempoolHistogram = new TreeMap<>();
 
@@ -182,6 +192,12 @@ public class AppServices {
     private AppServices(Application application, InteractionServices interactionServices) {
         this.application = application;
         this.interactionServices = interactionServices;
+
+        newBlockSubject.buffer(4, TimeUnit.SECONDS)
+                .filter(newBlockEvents -> !newBlockEvents.isEmpty())
+                .observeOn(JavaFxScheduler.platform())
+                .subscribe(this::fetchBlockSummaries, exception -> log.error("Error fetching block summaries", exception));
+
         EventManager.get().register(this);
     }
 
@@ -261,7 +277,7 @@ public class AppServices {
         }
 
         if(Tor.getDefault() != null) {
-            Tor.getDefault().getTorManager().destroy(true, success -> {});
+            Tor.getDefault().close();
         }
     }
 
@@ -290,12 +306,6 @@ public class AppServices {
             FeeRatesUpdatedEvent event = connectionService.getValue();
             if(event != null) {
                 EventManager.get().post(event);
-            }
-
-            FeeRatesSource feeRatesSource = Config.get().getFeeRatesSource();
-            feeRatesSource = (feeRatesSource == null ? FeeRatesSource.MEMPOOL_SPACE : feeRatesSource);
-            if(event instanceof ConnectionEvent && feeRatesSource.supportsNetwork(Network.get()) && feeRatesSource.isExternal()) {
-                EventManager.get().post(new FeeRatesSourceChangedEvent(feeRatesSource));
             }
         });
         connectionService.setOnFailed(failEvent -> {
@@ -477,6 +487,26 @@ public class AppServices {
             } else {
                 preventSleepService.cancel();
             }
+        }
+    }
+
+    private void fetchFeeRates() {
+        if(feeRatesService != null && !feeRatesService.isRunning() && Config.get().getMode() != Mode.OFFLINE) {
+            feeRatesService = createFeeRatesService();
+            feeRatesService.start();
+        }
+    }
+
+    private void fetchBlockSummaries(List<NewBlockEvent> newBlockEvents) {
+        if(isConnected()) {
+            ElectrumServer.BlockSummaryService blockSummaryService = new ElectrumServer.BlockSummaryService(newBlockEvents);
+            blockSummaryService.setOnSucceeded(_ -> {
+                EventManager.get().post(blockSummaryService.getValue());
+            });
+            blockSummaryService.setOnFailed(failedState -> {
+                log.error("Error fetching block summaries", failedState.getSource().getException());
+            });
+            blockSummaryService.start();
         }
     }
 
@@ -705,6 +735,10 @@ public class AppServices {
         return latestBlockHeader;
     }
 
+    public static Map<Integer, BlockSummary> getBlockSummaries() {
+        return blockSummaries;
+    }
+
     public static Double getDefaultFeeRate() {
         int defaultTarget = TARGET_BLOCKS_RANGE.get((TARGET_BLOCKS_RANGE.size() / 2) - 1);
         return getTargetBlockFeeRates() == null ? getFallbackFeeRate() : getTargetBlockFeeRates().get(defaultTarget);
@@ -714,6 +748,10 @@ public class AppServices {
         Optional<Double> optMinFeeRate = getTargetBlockFeeRates().values().stream().min(Double::compareTo);
         Double minRate = optMinFeeRate.orElse(getFallbackFeeRate());
         return Math.max(minRate, Transaction.DUST_RELAY_TX_FEE);
+    }
+
+    public static Double getNextBlockMedianFeeRate() {
+        return nextBlockMedianFeeRate == null ? getDefaultFeeRate() : nextBlockMedianFeeRate;
     }
 
     public static double getFallbackFeeRate() {
@@ -1095,8 +1133,7 @@ public class AppServices {
             walletChoiceDialog.initOwner(getActiveWindow());
             walletChoiceDialog.setTitle("Choose Wallet");
             walletChoiceDialog.setHeaderText("Choose a wallet to " + actionDescription);
-            Image image = new Image("/image/sparrow-small.png");
-            walletChoiceDialog.getDialogPane().setGraphic(new ImageView(image));
+            walletChoiceDialog.getDialogPane().setGraphic(new DialogImage(DialogImage.Type.SPARROW));
             setStageIcon(walletChoiceDialog.getDialogPane().getScene().getWindow());
             moveToActiveWindowScreen(walletChoiceDialog);
             Optional<Wallet> optWallet = walletChoiceDialog.showAndWait();
@@ -1185,6 +1222,16 @@ public class AppServices {
         minimumRelayFeeRate = Math.max(event.getMinimumRelayFeeRate(), Transaction.DEFAULT_MIN_RELAY_FEE);
         latestBlockHeader = event.getBlockHeader();
         Config.get().addRecentServer();
+
+        FeeRatesSource feeRatesSource = Config.get().getFeeRatesSource();
+        feeRatesSource = (feeRatesSource == null ? FeeRatesSource.MEMPOOL_SPACE : feeRatesSource);
+        if(feeRatesSource.supportsNetwork(Network.get()) && feeRatesSource.isExternal()) {
+            fetchFeeRates();
+        }
+
+        if(!blockSummaries.containsKey(currentBlockHeight)) {
+            fetchBlockSummaries(Collections.emptyList());
+        }
     }
 
     @Subscribe
@@ -1199,11 +1246,22 @@ public class AppServices {
         latestBlockHeader = event.getBlockHeader();
         String status = "Updating to new block height " + event.getHeight();
         EventManager.get().post(new StatusEvent(status));
+        newBlockSubject.onNext(event);
+    }
+
+    @Subscribe
+    public void blockSummary(BlockSummaryEvent event) {
+        blockSummaries.putAll(event.getBlockSummaryMap());
+        if(AppServices.currentBlockHeight != null) {
+            blockSummaries.keySet().removeIf(height -> AppServices.currentBlockHeight - height > 5);
+        }
+        nextBlockMedianFeeRate = event.getNextBlockMedianFeeRate();
     }
 
     @Subscribe
     public void feesUpdated(FeeRatesUpdatedEvent event) {
         targetBlockFeeRates = event.getTargetBlockFeeRates();
+        nextBlockMedianFeeRate = event.getNextBlockMedianFeeRate();
     }
 
     @Subscribe
@@ -1216,10 +1274,8 @@ public class AppServices {
     @Subscribe
     public void feeRateSourceChanged(FeeRatesSourceChangedEvent event) {
         //Perform once-off fee rates retrieval to immediately change displayed rates
-        if(feeRatesService != null && !feeRatesService.isRunning() && Config.get().getMode() != Mode.OFFLINE) {
-            feeRatesService = createFeeRatesService();
-            feeRatesService.start();
-        }
+        fetchFeeRates();
+        fetchBlockSummaries(Collections.emptyList());
     }
 
     @Subscribe
