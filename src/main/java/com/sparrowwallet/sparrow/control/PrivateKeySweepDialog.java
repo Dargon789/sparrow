@@ -14,6 +14,7 @@ import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.psbt.PSBTInput;
 import com.sparrowwallet.drongo.wallet.Wallet;
+import com.sparrowwallet.drongo.wallet.WalletModel;
 import com.sparrowwallet.sparrow.AppServices;
 import com.sparrowwallet.sparrow.EventManager;
 import com.sparrowwallet.sparrow.UnitFormat;
@@ -61,6 +62,7 @@ public class PrivateKeySweepDialog extends Dialog<Transaction> {
     private final TextArea key;
     private final ComboBox<ScriptType> keyScriptType;
     private final CopyableLabel keyAddress;
+    private final CopyableLabel keyUtxos;
     private final ComboBoxTextField toAddress;
     private final ComboBox<Wallet> toWallet;
     private final FeeRangeSlider feeRange;
@@ -72,14 +74,7 @@ public class PrivateKeySweepDialog extends Dialog<Transaction> {
         dialogPane.getStylesheets().add(AppServices.class.getResource("dialog.css").toExternalForm());
         AppServices.setStageIcon(dialogPane.getScene().getWindow());
         dialogPane.setHeaderText("Sweep Private Key");
-
-        Image image = new Image("image/seed.png", 50, 50, false, false);
-        if(!image.isError()) {
-            ImageView imageView = new ImageView();
-            imageView.setSmooth(false);
-            imageView.setImage(image);
-            dialogPane.setGraphic(imageView);
-        }
+        dialogPane.setGraphic(new WalletModelImage(WalletModel.SEED));
 
         Form form = new Form();
         Fieldset fieldset = new Fieldset();
@@ -135,6 +130,12 @@ public class PrivateKeySweepDialog extends Dialog<Transaction> {
         keyAddress = new CopyableLabel();
         keyAddress.getStyleClass().add("fixed-width");
         addressField.getInputs().add(keyAddress);
+
+        Field utxosField = new Field();
+        utxosField.setText("UTXOs:");
+        keyUtxos = new CopyableLabel();
+        utxosField.getInputs().add(keyUtxos);
+
 
         Field toAddressField = new Field();
         toAddressField.setText("Sweep to:");
@@ -355,6 +356,8 @@ public class PrivateKeySweepDialog extends Dialog<Transaction> {
                 Optional<Date> optSince = addressScanDateDialog.showAndWait();
                 if(optSince.isPresent()) {
                     since = optSince.get();
+                } else {
+                    return;
                 }
             }
 
@@ -369,7 +372,7 @@ public class PrivateKeySweepDialog extends Dialog<Transaction> {
             });
 
             if(Config.get().getServerType() == ServerType.BITCOIN_CORE) {
-                ServiceProgressDialog serviceProgressDialog = new ServiceProgressDialog("Address Scan", "Scanning address for transactions...", "/image/sparrow.png", addressUtxosService);
+                ServiceProgressDialog serviceProgressDialog = new ServiceProgressDialog("Address Scan", "Scanning address for transactions...", new DialogImage(DialogImage.Type.SPARROW), addressUtxosService);
                 serviceProgressDialog.initOwner(getDialogPane().getScene().getWindow());
                 AppServices.moveToActiveWindowScreen(serviceProgressDialog);
             }

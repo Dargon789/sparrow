@@ -10,8 +10,8 @@ import com.sparrowwallet.sparrow.io.Config;
 import com.sparrowwallet.sparrow.io.Storage;
 import com.sparrowwallet.sparrow.net.PublicElectrumServer;
 import com.sparrowwallet.sparrow.net.ServerType;
-import com.sparrowwallet.sparrow.preferences.PreferenceGroup;
-import com.sparrowwallet.sparrow.preferences.PreferencesDialog;
+import com.sparrowwallet.sparrow.settings.SettingsGroup;
+import com.sparrowwallet.sparrow.settings.SettingsDialog;
 import javafx.application.Application;
 import javafx.scene.text.Font;
 import javafx.stage.Stage;
@@ -57,8 +57,8 @@ public class SparrowDesktop extends Application {
                 Config.get().setMode(mode);
 
                 if(mode.equals(Mode.ONLINE)) {
-                    PreferencesDialog preferencesDialog = new PreferencesDialog(PreferenceGroup.SERVER, true);
-                    Optional<Boolean> optNewWallet = preferencesDialog.showAndWait();
+                    SettingsDialog settingsDialog = new SettingsDialog(SettingsGroup.SERVER, true);
+                    Optional<Boolean> optNewWallet = settingsDialog.showAndWait();
                     createNewWallet = optNewWallet.isPresent() && optNewWallet.get();
                 } else if(Network.get() == Network.MAINNET) {
                     Config.get().setServerType(ServerType.PUBLIC_ELECTRUM_SERVER);
@@ -70,10 +70,6 @@ public class SparrowDesktop extends Application {
 
         if(Config.get().getServerType() == null && Config.get().getCoreServer() == null && Config.get().getElectrumServer() != null) {
             Config.get().setServerType(ServerType.ELECTRUM_SERVER);
-        }
-
-        if(Config.get().getHdCapture() == null && OsType.getCurrent() == OsType.MACOS) {
-            Config.get().setHdCapture(Boolean.TRUE);
         }
 
         System.setProperty(Wallet.ALLOW_DERIVATIONS_MATCHING_OTHER_SCRIPT_TYPES_PROPERTY, Boolean.toString(!Config.get().isValidateDerivationPaths()));

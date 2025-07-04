@@ -16,11 +16,8 @@ import com.sparrowwallet.drongo.wallet.*;
 import com.sparrowwallet.sparrow.AppServices;
 import com.sparrowwallet.sparrow.EventManager;
 import com.sparrowwallet.sparrow.event.*;
-import com.sparrowwallet.sparrow.io.CardApi;
-import com.sparrowwallet.sparrow.io.Device;
-import com.sparrowwallet.sparrow.io.Hwi;
+import com.sparrowwallet.sparrow.io.*;
 import com.sparrowwallet.sparrow.glyphfont.FontAwesome5;
-import com.sparrowwallet.sparrow.io.CardAuthorizationException;
 import com.sparrowwallet.sparrow.net.ElectrumServer;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleStringProperty;
@@ -78,7 +75,7 @@ public class DevicePane extends TitledDescriptionPane {
     private boolean defaultDevice;
 
     public DevicePane(Wallet wallet, Device device, boolean defaultDevice, KeyDerivation requiredDerivation) {
-        super(device.getModel().toDisplayString(), "", "", "image/" + device.getType() + ".png");
+        super(device.getModel().toDisplayString(), "", "", device.getModel());
         this.deviceOperation = DeviceOperation.IMPORT;
         this.wallet = wallet;
         this.psbt = null;
@@ -105,7 +102,7 @@ public class DevicePane extends TitledDescriptionPane {
     }
 
     public DevicePane(Wallet wallet, PSBT psbt, Device device, boolean defaultDevice) {
-        super(device.getModel().toDisplayString(), "", "", "image/" + device.getType() + ".png");
+        super(device.getModel().toDisplayString(), "", "", device.getModel());
         this.deviceOperation = DeviceOperation.SIGN;
         this.wallet = wallet;
         this.psbt = psbt;
@@ -132,7 +129,7 @@ public class DevicePane extends TitledDescriptionPane {
     }
 
     public DevicePane(Wallet wallet, OutputDescriptor outputDescriptor, Device device, boolean defaultDevice) {
-        super(device.getModel().toDisplayString(), "", "", "image/" + device.getType() + ".png");
+        super(device.getModel().toDisplayString(), "", "", device.getModel());
         this.deviceOperation = DeviceOperation.DISPLAY_ADDRESS;
         this.wallet = wallet;
         this.psbt = null;
@@ -155,7 +152,7 @@ public class DevicePane extends TitledDescriptionPane {
     }
 
     public DevicePane(Wallet wallet, String message, KeyDerivation keyDerivation, Device device, boolean defaultDevice) {
-        super(device.getModel().toDisplayString(), "", "", "image/" + device.getType() + ".png");
+        super(device.getModel().toDisplayString(), "", "", device.getModel());
         this.deviceOperation = DeviceOperation.SIGN_MESSAGE;
         this.wallet = wallet;
         this.psbt = null;
@@ -182,7 +179,7 @@ public class DevicePane extends TitledDescriptionPane {
     }
 
     public DevicePane(Wallet wallet, List<StandardAccount> availableAccounts, Device device, boolean defaultDevice) {
-        super(device.getModel().toDisplayString(), "", "", "image/" + device.getType() + ".png");
+        super(device.getModel().toDisplayString(), "", "", device.getModel());
         this.deviceOperation = DeviceOperation.DISCOVER_KEYSTORES;
         this.wallet = wallet;
         this.psbt = null;
@@ -205,7 +202,7 @@ public class DevicePane extends TitledDescriptionPane {
     }
 
     public DevicePane(DeviceOperation deviceOperation, Device device, boolean defaultDevice) {
-        super(device.getModel().toDisplayString(), "", "", "image/" + device.getType() + ".png");
+        super(device.getModel().toDisplayString(), "", "", device.getModel());
         this.deviceOperation = deviceOperation;
         this.wallet = null;
         this.psbt = null;
@@ -778,10 +775,12 @@ public class DevicePane extends TitledDescriptionPane {
                 signButton.setDisable(false);
             }
         } else {
-            Hwi.SignPSBTService signPSBTService = new Hwi.SignPSBTService(device, passphrase.get(), psbt);
+            Hwi.SignPSBTService signPSBTService = new Hwi.SignPSBTService(device, passphrase.get(), psbt,
+                    OutputDescriptor.getOutputDescriptor(wallet), wallet.getFullName(), getDeviceRegistration());
             signPSBTService.setOnSucceeded(workerStateEvent -> {
                 PSBT signedPsbt = signPSBTService.getValue();
                 EventManager.get().post(new PSBTSignedEvent(psbt, signedPsbt));
+                updateDeviceRegistrations(signPSBTService.getNewDeviceRegistrations());
             });
             signPSBTService.setOnFailed(workerStateEvent -> {
                 setError("Signing Error", signPSBTService.getException().getMessage());
@@ -820,10 +819,12 @@ public class DevicePane extends TitledDescriptionPane {
     }
 
     private void displayAddress() {
-        Hwi.DisplayAddressService displayAddressService = new Hwi.DisplayAddressService(device, passphrase.get(), wallet.getScriptType(), outputDescriptor);
+        Hwi.DisplayAddressService displayAddressService = new Hwi.DisplayAddressService(device, passphrase.get(), wallet.getScriptType(), outputDescriptor,
+                OutputDescriptor.getOutputDescriptor(wallet), wallet.getFullName(), getDeviceRegistration());
         displayAddressService.setOnSucceeded(successEvent -> {
             String address = displayAddressService.getValue();
             EventManager.get().post(new AddressDisplayedEvent(address));
+            updateDeviceRegistrations(displayAddressService.getNewDeviceRegistrations());
         });
         displayAddressService.setOnFailed(failedEvent -> {
             setError("Could not display address", displayAddressService.getException().getMessage());
@@ -831,6 +832,26 @@ public class DevicePane extends TitledDescriptionPane {
         });
         setDescription("Check device for address");
         displayAddressService.start();
+    }
+
+    private byte[] getDeviceRegistration() {
+        Optional<Keystore> optKeystore = wallet.getKeystores().stream()
+                .filter(keystore -> keystore.getKeyDerivation().getMasterFingerprint().equals(device.getFingerprint()) && keystore.getDeviceRegistration() != null).findFirst();
+        return optKeystore.map(Keystore::getDeviceRegistration).orElse(null);
+    }
+
+    private void updateDeviceRegistrations(Set<byte[]> newDeviceRegistrations) {
+        if(!newDeviceRegistrations.isEmpty()) {
+            List<Keystore> registrationKeystores = getDeviceRegistrationKeystores();
+            if(!registrationKeystores.isEmpty()) {
+                registrationKeystores.forEach(keystore -> keystore.setDeviceRegistration(newDeviceRegistrations.iterator().next()));
+                EventManager.get().post(new KeystoreDeviceRegistrationsChangedEvent(wallet, registrationKeystores));
+            }
+        }
+    }
+
+    private List<Keystore> getDeviceRegistrationKeystores() {
+        return wallet.getKeystores().stream().filter(keystore -> keystore.getKeyDerivation().getMasterFingerprint().equals(device.getFingerprint())).toList();
     }
 
     private void signMessage() {

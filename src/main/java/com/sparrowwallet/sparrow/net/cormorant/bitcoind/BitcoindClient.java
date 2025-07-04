@@ -17,6 +17,7 @@ import com.sparrowwallet.sparrow.event.CormorantScanStatusEvent;
 import com.sparrowwallet.sparrow.event.CormorantSyncStatusEvent;
 import com.sparrowwallet.sparrow.io.Config;
 import com.sparrowwallet.sparrow.net.Bwt;
+import com.sparrowwallet.sparrow.net.ConfigurationException;
 import com.sparrowwallet.sparrow.net.CoreAuthType;
 import com.sparrowwallet.sparrow.net.cormorant.Cormorant;
 import com.sparrowwallet.drongo.address.Address;
@@ -47,6 +48,12 @@ public class BitcoindClient {
     private static final int POSTMIX_GAP_LIMIT = 4000;
 
     private static final long PRUNED_RESCAN_TIMEGAP_MILLIS = 7200*1000;
+
+    //Error codes from https://github.com/bitcoin/bitcoin/blob/master/src/rpc/protocol.h
+    public static final int RPC_METHOD_NOT_FOUND = -32601;
+    public static final int RPC_WALLET_NOT_FOUND = -18;
+
+    public static final String WALLET_ALREADY_LOADING_MESSAGE = "Wallet already loading.";
 
     private final JsonRpcClient jsonRpcClient;
     private final Timer timer = new Timer(true);
@@ -94,8 +101,10 @@ public class BitcoindClient {
         Config config = Config.get();
         if((config.getCoreAuthType() == CoreAuthType.COOKIE || config.getCoreAuth() == null || config.getCoreAuth().length() < 2) && config.getCoreDataDir() != null) {
             bitcoindTransport = new BitcoindTransport(config.getCoreServer(), CORE_WALLET_NAME, config.getCoreDataDir());
-        } else {
+        } else if(config.getCoreAuth() != null) {
             bitcoindTransport = new BitcoindTransport(config.getCoreServer(), CORE_WALLET_NAME, config.getCoreAuth());
+        } else {
+            throw new ConfigurationException("Bitcoin Core data folder or user and password is required");
         }
 
         this.jsonRpcClient = new JsonRpcClient(bitcoindTransport);
@@ -114,7 +123,7 @@ public class BitcoindClient {
         tip = blockHeader.getBlockHeader();
         timer.schedule(new PollTask(), 5000, 5000);
 
-        if(blockchainInfo.initialblockdownload()) {
+        if(blockchainInfo.initialblockdownload() && networkInfo.networkactive()) {
             syncingLock.lock();
             try {
                 syncing = true;
@@ -137,21 +146,27 @@ public class BitcoindClient {
             tip = blockHeader.getBlockHeader();
         }
 
-        ListWalletDirResult listWalletDirResult = getBitcoindService().listWalletDir();
-        if(listWalletDirResult == null) {
-            throw new RuntimeException("Wallet support must be enabled in Bitcoin Core");
+        List<String> loadedWallets;
+        try {
+            loadedWallets = getBitcoindService().listWallets();
+            legacyWalletExists = loadedWallets.contains(Bwt.DEFAULT_CORE_WALLET);
+        } catch(JsonRpcException e) {
+            if(e.getErrorMessage().getCode() == RPC_METHOD_NOT_FOUND) {
+                throw new BitcoinRPCException("Wallet support must be enabled in Bitcoin Core");
+            } else {
+                throw e;
+            }
         }
-        boolean exists = listWalletDirResult.wallets().stream().anyMatch(walletDirResult -> walletDirResult.name().equals(CORE_WALLET_NAME));
-        legacyWalletExists = listWalletDirResult.wallets().stream().anyMatch(walletDirResult -> walletDirResult.name().equals(Bwt.DEFAULT_CORE_WALLET));
 
-        List<String> loadedWallets = getBitcoindService().listWallets();
-        boolean loaded = loadedWallets.contains(CORE_WALLET_NAME);
-
-        if(!exists && !loaded) {
-            getBitcoindService().createWallet(CORE_WALLET_NAME, true, true, "", true, true, true, false);
-        } else {
-            if(!loaded) {
+        if(!loadedWallets.contains(CORE_WALLET_NAME)) {
+            try {
                 getBitcoindService().loadWallet(CORE_WALLET_NAME, true);
+            } catch(JsonRpcException e) {
+                if(e.getErrorMessage().getCode() == RPC_WALLET_NOT_FOUND) {
+                    getBitcoindService().createWallet(CORE_WALLET_NAME, true, true, "", true, true, true, false);
+                } else if(!WALLET_ALREADY_LOADING_MESSAGE.equals(e.getErrorMessage().getMessage())) {
+                    throw e;
+                }
             }
         }
 
@@ -183,9 +198,21 @@ public class BitcoindClient {
                     .sorted(Comparator.comparingLong(o -> o.getBirthDate().getTime())).collect(Collectors.toList());
             if(!prePruneWallets.isEmpty()) {
                 pruneWarnedDescriptors.add(e.getDescriptor());
-                Platform.runLater(() -> EventManager.get().post(new CormorantPruneStatusEvent("Error: Wallet birthday earlier than Bitcoin Core prune date", prePruneWallets.get(0), e.getRescanSince(), e.getPrunedDate(), legacyWalletExists)));
+                if(!legacyWalletExists) {
+                    legacyWalletExists = checkLegacyWalletExists();
+                }
+                Platform.runLater(() -> EventManager.get().post(new CormorantPruneStatusEvent("Error: Wallet birthday earlier than Bitcoin Core prune date", prePruneWallets.getFirst(), e.getRescanSince(), e.getPrunedDate(), legacyWalletExists)));
             }
             throw new ImportFailedException("Wallet birthday earlier than prune date");
+        }
+    }
+
+    private boolean checkLegacyWalletExists() {
+        try {
+            getBitcoindService().loadWallet(Bwt.DEFAULT_CORE_WALLET);
+            return true;
+        } catch(Exception e) {
+            return false;
         }
     }
 

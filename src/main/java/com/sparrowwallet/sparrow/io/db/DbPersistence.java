@@ -1,6 +1,7 @@
 package com.sparrowwallet.sparrow.io.db;
 
 import com.google.common.eventbus.Subscribe;
+import com.sparrowwallet.drongo.IOUtils;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.crypto.Argon2KeyDeriver;
 import com.sparrowwallet.drongo.crypto.AsymmetricKeyDeriver;
@@ -268,7 +269,7 @@ public class DbPersistence implements Persistence {
                 }
 
                 if(dirtyPersistables.label != null) {
-                    walletDao.updateLabel(wallet.getId(), dirtyPersistables.label.length() > 255 ? dirtyPersistables.label.substring(0, 255) : dirtyPersistables.label);
+                    walletDao.updateLabel(wallet.getId(), dirtyPersistables.label.length() > Wallet.MAX_LABEL_LENGTH ? dirtyPersistables.label.substring(0, Wallet.MAX_LABEL_LENGTH) : dirtyPersistables.label);
                 }
 
                 if(dirtyPersistables.blockHeight != null) {
@@ -323,6 +324,11 @@ public class DbPersistence implements Persistence {
                     walletConfigDao.addOrUpdate(wallet, wallet.getWalletConfig());
                 }
 
+                if(dirtyPersistables.walletTable != null) {
+                    WalletTableDao walletTableDao = handle.attach(WalletTableDao.class);
+                    walletTableDao.addOrUpdate(wallet, dirtyPersistables.walletTable.getTableType(), dirtyPersistables.walletTable);
+                }
+
                 if(dirtyPersistables.mixConfig) {
                     MixConfigDao mixConfigDao = handle.attach(MixConfigDao.class);
                     mixConfigDao.addOrUpdate(wallet, wallet.getMixConfig());
@@ -352,6 +358,13 @@ public class DbPersistence implements Persistence {
                     KeystoreDao keystoreDao = handle.attach(KeystoreDao.class);
                     for(Keystore keystore : dirtyPersistables.encryptionKeystores) {
                         keystoreDao.updateKeystoreEncryption(keystore);
+                    }
+                }
+
+                if(!dirtyPersistables.registrationKeystores.isEmpty()) {
+                    KeystoreDao keystoreDao = handle.attach(KeystoreDao.class);
+                    for(Keystore keystore : dirtyPersistables.registrationKeystores) {
+                        keystoreDao.updateDeviceRegistration(keystore.getDeviceRegistration(), keystore.getId());
                     }
                 }
 
@@ -762,6 +775,13 @@ public class DbPersistence implements Persistence {
     }
 
     @Subscribe
+    public void walletTableChanged(WalletTableChangedEvent event) {
+        if(persistsFor(event.getWallet()) && event.getTableType() != null && event.getWallet().getWalletTable(event.getTableType()) != null) {
+            updateExecutor.execute(() -> dirtyPersistablesMap.computeIfAbsent(event.getWallet(), key -> new DirtyPersistables()).walletTable = event.getWalletTable());
+        }
+    }
+
+    @Subscribe
     public void walletMixConfigChanged(WalletMixConfigChangedEvent event) {
         if(persistsFor(event.getWallet()) && event.getWallet().getMixConfig() != null) {
             updateExecutor.execute(() -> dirtyPersistablesMap.computeIfAbsent(event.getWallet(), key -> new DirtyPersistables()).mixConfig = true);
@@ -793,6 +813,13 @@ public class DbPersistence implements Persistence {
     }
 
     @Subscribe
+    public void keystoreDeviceRegistrationsChanged(KeystoreDeviceRegistrationsChangedEvent event) {
+        if(persistsFor(event.getWallet())) {
+            updateExecutor.execute(() -> dirtyPersistablesMap.computeIfAbsent(event.getWallet(), key -> new DirtyPersistables()).registrationKeystores.addAll(event.getChangedKeystores()));
+        }
+    }
+
+    @Subscribe
     public void walletWatchLastChanged(WalletWatchLastChangedEvent event) {
         if(persistsFor(event.getWallet())) {
             updateExecutor.execute(() -> dirtyPersistablesMap.computeIfAbsent(event.getWallet(), key -> new DirtyPersistables()).watchLast = event.getWatchLast());
@@ -810,11 +837,13 @@ public class DbPersistence implements Persistence {
         public final List<Entry> labelEntries = new ArrayList<>();
         public final List<BlockTransactionHashIndex> utxoStatuses = new ArrayList<>();
         public boolean walletConfig;
+        public WalletTable walletTable = null;
         public boolean mixConfig;
         public final Map<Sha256Hash, UtxoMixData> changedUtxoMixes = new HashMap<>();
         public final Map<Sha256Hash, UtxoMixData> removedUtxoMixes = new HashMap<>();
         public final List<Keystore> labelKeystores = new ArrayList<>();
         public final List<Keystore> encryptionKeystores = new ArrayList<>();
+        public final List<Keystore> registrationKeystores = new ArrayList<>();
 
         public String toString() {
             return "Dirty Persistables" +
@@ -830,11 +859,13 @@ public class DbPersistence implements Persistence {
                     "\nUTXO labels:" + labelEntries.stream().filter(entry -> entry instanceof HashIndexEntry).map(entry -> ((HashIndexEntry)entry).getHashIndex().toString()).collect(Collectors.toList()) +
                     "\nUTXO statuses:" + utxoStatuses +
                     "\nWallet config:" + walletConfig +
+                    "\nWallet table:" + walletTable +
                     "\nMix config:" + mixConfig +
                     "\nUTXO mixes changed:" + changedUtxoMixes +
                     "\nUTXO mixes removed:" + removedUtxoMixes +
                     "\nKeystore labels:" + labelKeystores.stream().map(Keystore::getLabel).collect(Collectors.toList()) +
-                    "\nKeystore encryptions:" + encryptionKeystores.stream().map(Keystore::getLabel).collect(Collectors.toList());
+                    "\nKeystore encryptions:" + encryptionKeystores.stream().map(Keystore::getLabel).collect(Collectors.toList()) +
+                    "\nKeystore registrations:" + registrationKeystores.stream().map(Keystore::getDeviceRegistration).collect(Collectors.toList());
         }
     }
 }

@@ -20,18 +20,8 @@ open module com.sparrowwallet.sparrow {
     requires org.jetbrains.annotations;
     requires com.fasterxml.jackson.databind;
     requires com.fasterxml.jackson.annotation;
-    requires kotlin.stdlib;
-    requires kmp.tor.jvm;
-    requires kmp.tor.binary.extract.jvm;
-    requires kmp.tor.common.jvm;
-    requires kmp.tor.controller.common.jvm;
-    requires kmp.tor.manager.jvm;
-    requires kmp.tor.manager.common.jvm;
-    requires kmp.tor.ext.callback.manager.jvm;
-    requires kmp.tor.ext.callback.common.jvm;
-    requires kmp.tor.ext.callback.manager.common.jvm;
-    requires kmp.tor.ext.callback.controller.common.jvm;
-    requires parcelize.jvm;
+    requires io.matthewnelson.kmp.tor.runtime;
+    requires io.matthewnelson.kmp.tor.resource.exec.tor;
     requires kotlinx.coroutines.javafx;
     requires org.slf4j;
     requires com.google.gson;
@@ -42,12 +32,11 @@ open module com.sparrowwallet.sparrow {
     requires com.h2database;
     requires com.sparrowwallet.hummingbird;
     requires org.fxmisc.flowless;
-    requires com.github.sarxos.webcam.capture;
+    requires openpnp.capture.java;
     requires centerdevice.nsmenufx;
     requires org.jcommander;
     requires jul.to.slf4j;
     requires net.sourceforge.javacsv;
-    requires com.nativelibs4java.bridj;
     requires org.reactfx.reactfx;
     requires dev.bwt.jni;
     requires io.reactivex.rxjava2;
@@ -65,4 +54,6 @@ open module com.sparrowwallet.sparrow {
     requires java.smartcardio;
     requires com.jcraft.jzlib;
     requires com.sparrowwallet.tern;
+    requires com.sparrowwallet.lark;
+    requires com.sun.jna;
 }

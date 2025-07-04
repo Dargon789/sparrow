@@ -1,9 +1,7 @@
 package com.sparrowwallet.sparrow;
 
 import com.beust.jcommander.JCommander;
-import com.google.common.base.Charsets;
 import com.google.common.eventbus.Subscribe;
-import com.google.common.io.ByteSource;
 import com.sparrowwallet.drongo.*;
 import com.sparrowwallet.drongo.crypto.*;
 import com.sparrowwallet.drongo.policy.PolicyType;
@@ -23,8 +21,8 @@ import com.sparrowwallet.sparrow.io.bbqr.BBQR;
 import com.sparrowwallet.sparrow.io.bbqr.BBQRType;
 import com.sparrowwallet.sparrow.net.ElectrumServer;
 import com.sparrowwallet.sparrow.net.ServerType;
-import com.sparrowwallet.sparrow.preferences.PreferenceGroup;
-import com.sparrowwallet.sparrow.preferences.PreferencesDialog;
+import com.sparrowwallet.sparrow.settings.SettingsGroup;
+import com.sparrowwallet.sparrow.settings.SettingsDialog;
 import com.sparrowwallet.sparrow.paynym.PayNymDialog;
 import com.sparrowwallet.sparrow.transaction.TransactionController;
 import com.sparrowwallet.sparrow.transaction.TransactionData;
@@ -80,6 +78,7 @@ public class AppController implements Initializable {
     private static final Logger log = LoggerFactory.getLogger(AppController.class);
 
     public static final String DRAG_OVER_CLASS = "drag-over";
+    public static final int TAB_LABEL_MAX_WIDTH = 300;
     public static final double TAB_LABEL_GRAPHIC_OPACITY_INACTIVE = 0.8;
     public static final double TAB_LABEL_GRAPHIC_OPACITY_ACTIVE = 0.95;
     public static final String LOADING_TRANSACTIONS_MESSAGE = "Loading wallet, select Transactions tab to view...";
@@ -149,6 +148,10 @@ public class AppController implements Initializable {
     @FXML
     private CheckMenuItem useHdCameraResolution;
     private static final BooleanProperty useHdCameraResolutionProperty = new SimpleBooleanProperty();
+
+    @FXML
+    private CheckMenuItem mirrorCameraImage;
+    private static final BooleanProperty mirrorCameraImageProperty = new SimpleBooleanProperty();
 
     @FXML
     private CheckMenuItem showLoadingLog;
@@ -274,7 +277,7 @@ public class AppController implements Initializable {
     }
 
     void initializeView() {
-        setPlatformApplicationMenu();
+        Platform.runLater(this::setPlatformApplicationMenu);
 
         rootStack.getScene().getWindow().setOnHiding(windowEvent -> {
             if(searchWalletDialog != null && searchWalletDialog.isShowing()) {
@@ -377,8 +380,10 @@ public class AppController implements Initializable {
         openWalletsInNewWindows.selectedProperty().bindBidirectional(openWalletsInNewWindowsProperty);
         hideEmptyUsedAddressesProperty.set(Config.get().isHideEmptyUsedAddresses());
         hideEmptyUsedAddresses.selectedProperty().bindBidirectional(hideEmptyUsedAddressesProperty);
-        useHdCameraResolutionProperty.set(Config.get().isHdCapture());
+        useHdCameraResolutionProperty.set(Config.get().getWebcamResolution() == null || Config.get().getWebcamResolution().isWidescreenAspect());
         useHdCameraResolution.selectedProperty().bindBidirectional(useHdCameraResolutionProperty);
+        mirrorCameraImageProperty.set(Config.get().isMirrorCapture());
+        mirrorCameraImage.selectedProperty().bindBidirectional(mirrorCameraImageProperty);
         showTxHexProperty.set(Config.get().isShowTransactionHex());
         showTxHex.selectedProperty().bindBidirectional(showTxHexProperty);
         showLoadingLogProperty.set(Config.get().isShowLoadingLog());
@@ -450,11 +455,11 @@ public class AppController implements Initializable {
         OsType osType = OsType.getCurrent();
         if(osType == OsType.MACOS) {
             MenuToolkit tk = MenuToolkit.toolkit();
-            MenuItem preferences = new MenuItem("Preferences...");
-            preferences.setOnAction(this::openPreferences);
-            preferences.setAccelerator(new KeyCodeCombination(KeyCode.COMMA, KeyCombination.META_DOWN));
+            MenuItem settings = new MenuItem("Settings...");
+            settings.setOnAction(this::openSettings);
+            settings.setAccelerator(new KeyCodeCombination(KeyCode.COMMA, KeyCombination.META_DOWN));
             Menu defaultApplicationMenu = new Menu("Apple", null, tk.createAboutMenuItem(SparrowWallet.APP_NAME, getAboutStage()), new SeparatorMenuItem(),
-                    preferences, new SeparatorMenuItem(),
+                    settings, new SeparatorMenuItem(),
                     tk.createHideMenuItem(SparrowWallet.APP_NAME), tk.createHideOthersMenuItem(), tk.createUnhideAllMenuItem(), new SeparatorMenuItem(),
                     tk.createQuitMenuItem(SparrowWallet.APP_NAME));
             tk.setApplicationMenu(defaultApplicationMenu);
@@ -492,7 +497,7 @@ public class AppController implements Initializable {
         welcomeDialog.initOwner(rootStack.getScene().getWindow());
         Optional<Mode> optionalMode = welcomeDialog.showAndWait();
         if(optionalMode.isPresent() && optionalMode.get().equals(Mode.ONLINE)) {
-            openPreferences(PreferenceGroup.SERVER);
+            openSettings(SettingsGroup.SERVER);
         }
     }
 
@@ -566,21 +571,27 @@ public class AppController implements Initializable {
     }
 
     public void installUdevRules(ActionEvent event) {
-        Hwi.EnumerateService enumerateService = new Hwi.EnumerateService(null);
-        enumerateService.setOnSucceeded(workerStateEvent -> {
-            Platform.runLater(this::showInstallUdevMessage);
-        });
-        enumerateService.setOnFailed(workerStateEvent -> {
-            Platform.runLater(this::showInstallUdevMessage);
-        });
-        enumerateService.start();
-    }
+        String commands = """
+                sudo install -m 644 /opt/sparrowwallet/lib/runtime/conf/udev/*.rules /etc/udev/rules.d
+                sudo udevadm control --reload
+                sudo udevadm trigger
+                sudo groupadd -f plugdev
+                sudo usermod -aG plugdev `whoami`
+                """;
+        String home = System.getProperty(JPACKAGE_APP_PATH);
+        if(home != null && !home.startsWith("/opt/sparrowwallet") && home.endsWith("bin/Sparrow")) {
+            home = home.replace("bin/Sparrow", "");
+            commands = commands.replace("/opt/sparrowwallet/", home);
+        }
 
-    public void showInstallUdevMessage() {
-        TextAreaDialog dialog = new TextAreaDialog("sudo " + Config.get().getHwi().getAbsolutePath() + " installudevrules", false);
+        TextAreaDialog dialog = new TextAreaDialog(commands, false);
         dialog.initOwner(rootStack.getScene().getWindow());
-        dialog.setTitle("Install Udev Rules");
-        dialog.getDialogPane().setHeaderText("Installing udev rules ensures devices can connect over USB.\nThis command requires root privileges.\nOpen a shell and enter the following:");
+        dialog.setTitle("Install udev Rules");
+        dialog.getDialogPane().setHeaderText("""
+                Installing udev rules ensures devices can connect over USB.
+                These commands require root privileges.
+                Open a shell and enter the following.
+                """);
         dialog.showAndWait();
     }
 
@@ -621,19 +632,10 @@ public class AppController implements Initializable {
                 byte[] bytes = Files.readAllBytes(file.toPath());
                 String name = file.getName();
 
-                try {
+                if(Utils.isHex(bytes) || Utils.isBase64(bytes)) {
+                    addTransactionTab(name, file, new String(bytes, StandardCharsets.UTF_8).trim());
+                } else {
                     addTransactionTab(name, file, bytes);
-                } catch(ParseException e) {
-                    ByteArrayInputStream inputStream = new ByteArrayInputStream(bytes);
-                    ByteSource byteSource = new ByteSource() {
-                        @Override
-                        public InputStream openStream() {
-                            return inputStream;
-                        }
-                    };
-
-                    String text = byteSource.asCharSource(Charsets.UTF_8).read().trim();
-                    addTransactionTab(name, file, text);
                 }
             } catch(IOException e) {
                 showErrorDialog("Error opening file", e.getMessage());
@@ -943,7 +945,16 @@ public class AppController implements Initializable {
 
     public void useHdCameraResolution(ActionEvent event) {
         CheckMenuItem item = (CheckMenuItem)event.getSource();
-        Config.get().setHdCapture(item.isSelected());
+        if(Config.get().getWebcamResolution().isStandardAspect() && item.isSelected()) {
+            Config.get().setWebcamResolution(WebcamResolution.HD);
+        } else if(Config.get().getWebcamResolution().isWidescreenAspect() && !item.isSelected()) {
+            Config.get().setWebcamResolution(WebcamResolution.VGA);
+        }
+    }
+
+    public void mirrorCameraImage(ActionEvent event) {
+        CheckMenuItem item = (CheckMenuItem)event.getSource();
+        Config.get().setMirrorCapture(item.isSelected());
     }
 
     public void showLoadingLog(ActionEvent event) {
@@ -1023,6 +1034,10 @@ public class AppController implements Initializable {
             cmd.add(System.getProperty(JPACKAGE_APP_PATH));
             cmd.addAll(args.toParams());
             final ProcessBuilder builder = new ProcessBuilder(cmd);
+            if(OsType.getCurrent() == OsType.UNIX) {
+                Map<String, String> env = builder.environment();
+                env.remove("LD_LIBRARY_PATH");
+            }
             builder.start();
             quit(event);
         } catch(Exception e) {
@@ -1246,6 +1261,10 @@ public class AppController implements Initializable {
     }
 
     private void addImportedWallet(Wallet wallet) {
+        if(AppServices.disallowAnyInvalidDerivationPaths(wallet)) {
+            return;
+        }
+
         WalletNameDialog nameDlg = new WalletNameDialog(wallet.getName(), true, wallet.getBirthDate());
         nameDlg.initOwner(rootStack.getScene().getWindow());
         Optional<WalletNameDialog.NameAndBirthDate> optNameAndBirthDate = nameDlg.showAndWait();
@@ -1361,7 +1380,7 @@ public class AppController implements Initializable {
     public void exportWallet(ActionEvent event) {
         WalletForm selectedWalletForm = getSelectedWalletForm();
         if(selectedWalletForm != null) {
-            WalletExportDialog dlg = new WalletExportDialog(selectedWalletForm);
+            WalletExportDialog dlg = new WalletExportDialog(selectedWalletForm, getSelectedWalletForms());
             dlg.initOwner(rootStack.getScene().getWindow());
             Optional<Wallet> wallet = dlg.showAndWait();
             if(wallet.isPresent()) {
@@ -1370,18 +1389,18 @@ public class AppController implements Initializable {
         }
     }
 
-    public void openPreferences(ActionEvent event) {
-        openPreferences(PreferenceGroup.GENERAL);
+    public void openSettings(ActionEvent event) {
+        openSettings(SettingsGroup.GENERAL);
     }
 
-    public void openServerPreferences(ActionEvent event) {
-        openPreferences(PreferenceGroup.SERVER);
+    public void openServerSettings(ActionEvent event) {
+        openSettings(SettingsGroup.SERVER);
     }
 
-    private void openPreferences(PreferenceGroup preferenceGroup) {
-        PreferencesDialog preferencesDialog = new PreferencesDialog(preferenceGroup);
-        preferencesDialog.initOwner(rootStack.getScene().getWindow());
-        preferencesDialog.showAndWait();
+    private void openSettings(SettingsGroup settingsGroup) {
+        SettingsDialog settingsDialog = new SettingsDialog(settingsGroup);
+        settingsDialog.initOwner(rootStack.getScene().getWindow());
+        settingsDialog.showAndWait();
         configureSwitchServer();
         serverToggle.setDisable(!Config.get().hasServer());
     }
@@ -1407,6 +1426,10 @@ public class AppController implements Initializable {
     }
 
     public void sendToMany(ActionEvent event) {
+        sendToMany(Collections.emptyList());
+    }
+
+    private void sendToMany(List<Payment> initialPayments) {
         if(sendToManyDialog != null) {
             Stage stage = (Stage)sendToManyDialog.getDialogPane().getScene().getWindow();
             stage.setAlwaysOnTop(true);
@@ -1422,7 +1445,7 @@ public class AppController implements Initializable {
                 bitcoinUnit = wallet.getAutoUnit();
             }
 
-            sendToManyDialog = new SendToManyDialog(bitcoinUnit);
+            sendToManyDialog = new SendToManyDialog(bitcoinUnit, initialPayments);
             sendToManyDialog.initModality(Modality.NONE);
             Optional<List<Payment>> optPayments = sendToManyDialog.showAndWait();
             sendToManyDialog = null;
@@ -1463,6 +1486,7 @@ public class AppController implements Initializable {
             stage.setAlwaysOnTop(true);
             stage.setAlwaysOnTop(false);
             if(event.getSource() instanceof File file) {
+                downloadVerifierDialog.setInitialFile(file);
                 downloadVerifierDialog.setSignatureFile(file);
             }
             return;
@@ -1975,8 +1999,13 @@ public class AppController implements Initializable {
             glyph.setFontSize(10.0);
             glyph.setOpacity(TAB_LABEL_GRAPHIC_OPACITY_ACTIVE);
             Label tabLabel = new Label(tabName);
+            tabLabel.setMaxWidth(TAB_LABEL_MAX_WIDTH);
             tabLabel.setGraphic(glyph);
             tabLabel.setGraphicTextGap(5.0);
+            if(TextUtils.computeTextWidth(tabLabel.getFont(), tabName, 0.0D) > TAB_LABEL_MAX_WIDTH) {
+                Tooltip tooltip = new Tooltip(tabName);
+                tabLabel.setTooltip(tooltip);
+            }
             tab.setGraphic(tabLabel);
             tab.setContextMenu(getTabContextMenu(tab));
             tab.setClosable(true);
@@ -2613,7 +2642,6 @@ public class AppController implements Initializable {
                     }
                 });
 
-                Image image = new Image("image/sparrow-small.png", 50, 50, false, false);
                 String walletName = event.getWallet().getFullDisplayName();
                 if(walletName.length() > 40) {
                     walletName = walletName.substring(0, 40) + "...";
@@ -2622,10 +2650,10 @@ public class AppController implements Initializable {
                 Notifications notificationBuilder = Notifications.create()
                         .title("Sparrow - " + walletName)
                         .text(text)
-                        .graphic(new ImageView(image))
+                        .graphic(new DialogImage(DialogImage.Type.SPARROW))
                         .hideAfter(Duration.seconds(15))
                         .position(Pos.TOP_RIGHT)
-                        .threshold(5, Notifications.create().title("Sparrow").text("Multiple new wallet transactions").graphic(new ImageView(image)))
+                        .threshold(5, Notifications.create().title("Sparrow").text("Multiple new wallet transactions").graphic(new DialogImage(DialogImage.Type.SPARROW)))
                         .onAction(e -> selectTab(event.getWallet()));
 
                 //If controlsfx can't find our window, we must set the window ourselves (unfortunately notification is then shown within this window)
@@ -2741,8 +2769,8 @@ public class AppController implements Initializable {
     @Subscribe
     public void connectionFailed(ConnectionFailedEvent event) {
         String status = CONNECTION_FAILED_PREFIX + event.getMessage();
-        Hyperlink hyperlink = new Hyperlink("Server Preferences");
-        hyperlink.setOnAction(this::openServerPreferences);
+        Hyperlink hyperlink = new Hyperlink("Server Settings");
+        hyperlink.setOnAction(this::openServerSettings);
         statusUpdated(new StatusEvent(status, hyperlink));
         serverToggleStopAnimation();
         setTorIcon();
@@ -2866,6 +2894,7 @@ public class AppController implements Initializable {
             }
         } else if(event.isCompleted()) {
             serverToggle.setDisable(false);
+            statusBar.setProgress(0);
             if(statusBar.getText().startsWith("Scanning...")) {
                 statusBar.setText("");
             }
@@ -3087,6 +3116,11 @@ public class AppController implements Initializable {
     }
 
     @Subscribe
+    public void requestSendToMany(RequestSendToManyEvent event) {
+        sendToMany(event.getPayments());
+    }
+
+    @Subscribe
     public void functionAction(FunctionActionEvent event) {
         selectTab(event.getWallet());
     }
@@ -3135,5 +3169,15 @@ public class AppController implements Initializable {
                 }
             }
         }
+    }
+
+    @Subscribe
+    public void webcamResolutionChanged(WebcamResolutionChangedEvent event) {
+        useHdCameraResolutionProperty.set(event.getResolution().isWidescreenAspect());
+    }
+
+    @Subscribe
+    public void webcamMirroredChanged(WebcamMirroredChangedEvent event) {
+        mirrorCameraImageProperty.set(event.isMirrored());
     }
 }

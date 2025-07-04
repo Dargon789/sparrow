@@ -3,39 +3,24 @@ plugins {
     id 'org-openjfx-javafxplugin'
     id 'org.beryx.jlink' version '3.1.1'
     id 'org.gradlex.extra-java-module-info' version '1.9'
+    id 'io.matthewnelson.kmp.tor.resource-filterjar' version '408.16.3'
 }
 
-def sparrowVersion = '2.0.1'
 def os = org.gradle.internal.os.OperatingSystem.current()
 def osName = os.getFamilyName()
 if(os.macOsX) {
     osName = "osx"
 }
-def targetName = ""
 def osArch = "x64"
 def releaseArch = "x86_64"
 if(System.getProperty("os.arch") == "aarch64") {
     osArch = "aarch64"
     releaseArch = "aarch64"
-    targetName = "-" + osArch
 }
 def headless = "true".equals(System.getProperty("java.awt.headless"))
 
-def vTor = '4.7.13-4'
-def vKmpTor = '1.4.3'
-def kmpOs = osName
-if(os.macOsX) {
-    kmpOs = "macos"
-} else if(os.windows) {
-    kmpOs = "mingw"
-}
-def kmpArch = "x64"
-if(System.getProperty("os.arch") == "aarch64") {
-    kmpArch = "arm64"
-}
-
-group "com.sparrowwallet"
-version "${sparrowVersion}"
+group 'com.sparrowwallet'
+version '2.2.4'
 
 repositories {
     mavenCentral()
@@ -48,7 +33,7 @@ tasks.withType(AbstractArchiveTask) {
 }
 
 javafx {
-    version = headless ? "18" : "22"
+    version = headless ? "18" : "23.0.2"
     modules = [ 'javafx.controls', 'javafx.fxml', 'javafx.swing', 'javafx.graphics' ]
 }
 
@@ -59,6 +44,7 @@ java {
 dependencies {
     //Any changes to the dependencies must be reflected in the module definitions below!
     implementation(project(':drongo'))
+    implementation(project(':lark'))
     implementation('com.google.guava:guava:33.0.0-jre')
     implementation('com.google.code.gson:gson:2.9.1')
     implementation('com.h2database:h2:2.1.214')
@@ -71,7 +57,7 @@ dependencies {
     implementation('org.jdbi:jdbi3-sqlobject:3.20.0') {
         exclude group: 'org.slf4j'
     }
-    implementation('org.flywaydb:flyway-core:9.1.3')
+    implementation('org.flywaydb:flyway-core:9.22.3')
     implementation('org.fxmisc.richtext:richtextfx:0.10.4')
     implementation('no.tornado:tornadofx-controls:1.0.4')
     implementation('com.google.zxing:javase:3.4.0') {
@@ -88,31 +74,10 @@ dependencies {
     implementation('com.fasterxml.jackson.core:jackson-databind:2.17.2')
     implementation('com.sparrowwallet:hummingbird:1.7.4')
     implementation('co.nstant.in:cbor:0.9')
-    implementation("com.nativelibs4java:bridj${targetName}:0.7-20140918-3") {
-        exclude group: 'com.google.android.tools', module: 'dx'
-    }
-    implementation("com.github.sarxos:webcam-capture${targetName}:0.3.13-SNAPSHOT") {
-        exclude group: 'com.nativelibs4java', module: 'bridj'
-    }
-    implementation("io.matthewnelson.kotlin-components:kmp-tor:${vTor}-${vKmpTor}") {
-        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
-    }
-    if(kmpOs == "linux" && kmpArch == "arm64") {
-        implementation("com.sparrowwallet.kmp-tor-binary:kmp-tor-binary-${kmpOs}${kmpArch}-jvm:${vTor}") {
-            exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
-        }
-    } else {
-        implementation("io.matthewnelson.kotlin-components:kmp-tor-binary-${kmpOs}${kmpArch}:${vTor}") {
-            exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
-        }
-    }
-    implementation("io.matthewnelson.kotlin-components:kmp-tor-binary-extract:${vTor}") {
-        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
-    }
-    implementation("io.matthewnelson.kotlin-components:kmp-tor-ext-callback-manager:${vKmpTor}") {
-        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
-    }
-    implementation('org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.7.1') {
+    implementation('org.openpnp:openpnp-capture-java:0.0.28-6')
+    implementation("io.matthewnelson.kmp-tor:runtime:2.2.1")
+    implementation("io.matthewnelson.kmp-tor:resource-exec-tor-gpl:408.16.3")
+    implementation('org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.10.1') {
         exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-common'
     }
     implementation('de.codecentric.centerdevice:centerdevice-nsmenufx:2.1.7')
@@ -139,7 +104,7 @@ dependencies {
     implementation('org.apache.commons:commons-compress:1.27.1')
     implementation('net.sourceforge.streamsupport:streamsupport:1.7.0')
     implementation('com.github.librepdf:openpdf:1.3.30')
-    implementation('com.googlecode.lanterna:lanterna:3.1.1')
+    implementation('com.googlecode.lanterna:lanterna:3.1.3')
     implementation('net.coobird:thumbnailator:0.4.18')
     implementation('com.github.hervegirod:fxsvgimage:1.1')
     implementation('com.sparrowwallet:toucan:0.9.0')
@@ -200,7 +165,7 @@ application {
                                  "--add-reads=org.flywaydb.core=java.desktop"]
 
     if(os.macOsX) {
-        applicationDefaultJvmArgs += ["-Dprism.lcdtext=false", "-Xdock:name=Sparrow", "-Xdock:icon=/Users/scy/git/sparrow/src/main/resources/sparrow-large.png",
+        applicationDefaultJvmArgs += ["-Dprism.lcdtext=false", "-Xdock:name=Sparrow",
                                       "--add-opens=javafx.graphics/com.sun.glass.ui.mac=centerdevice.nsmenufx"]
     }
     if(headless) {
@@ -255,6 +220,7 @@ jlink {
                    "--add-reads=com.sparrowwallet.merged.module=co.nstant.in.cbor",
                    "--add-reads=com.sparrowwallet.merged.module=org.bouncycastle.pg",
                    "--add-reads=com.sparrowwallet.merged.module=org.bouncycastle.provider",
+                   "--add-reads=com.sparrowwallet.merged.module=kotlin.stdlib",
                    "--add-reads=kotlin.stdlib=kotlinx.coroutines.core",
                    "--add-reads=org.flywaydb.core=java.desktop"]
 
@@ -262,7 +228,7 @@ jlink {
             jvmArgs += ["-Djavax.accessibility.assistive_technologies", "-Djavax.accessibility.screen_magnifier_present=false"]
         }
         if(os.macOsX) {
-            jvmArgs += ["-Dprism.lcdtext=false", "--add-opens=javafx.graphics/com.sun.glass.ui.mac=com.sparrowwallet.merged.module"]
+            jvmArgs += ["-Dprism.lcdtext=false", "--add-opens=javafx.graphics/com.sun.glass.ui.mac=com.sparrowwallet.merged.module", "--add-opens=javafx.graphics/com.sun.glass.ui.mac=centerdevice.nsmenufx"]
         }
         if(headless) {
             jvmArgs += ["-Dglass.platform=Monocle", "-Dmonocle.platform=Headless", "-Dprism.order=sw"]
@@ -272,7 +238,7 @@ jlink {
     jpackage {
         imageName = "Sparrow"
         installerName = "Sparrow"
-        appVersion = "${sparrowVersion}"
+        appVersion = "${version}"
         skipInstaller = os.macOsX || properties.skipInstallers
         imageOptions = []
         installerOptions = ['--file-associations', 'src/main/deploy/psbt.properties', '--file-associations', 'src/main/deploy/txn.properties', '--file-associations', 'src/main/deploy/asc.properties', '--file-associations', 'src/main/deploy/bitcoin.properties', '--file-associations', 'src/main/deploy/auth47.properties', '--file-associations', 'src/main/deploy/lightning.properties', '--license-file', 'LICENSE']
@@ -283,11 +249,13 @@ jlink {
         }
         if(os.linux) {
             if(headless) {
-                installerOptions = ['--license-file', 'LICENSE', '--resource-dir', "src/main/deploy/package/linux-headless/${osArch}"]
+                installerName = "sparrowserver"
+                installerOptions = ['--license-file', 'LICENSE']
             } else {
-                installerOptions += ['--resource-dir', 'src/main/deploy/package/linux/', '--linux-shortcut', '--linux-menu-group', 'Sparrow']
+                installerName = "sparrowwallet"
+                installerOptions += ['--linux-shortcut', '--linux-menu-group', 'Sparrow']
             }
-            installerOptions += ['--linux-app-category', 'utils', '--linux-app-release', '1', '--linux-rpm-license-type', 'ASL 2.0', '--linux-deb-maintainer', 'mail@sparrowwallet.com']
+            installerOptions += ['--resource-dir', layout.buildDirectory.dir('deploy/package').get().asFile.toString(), '--linux-app-category', 'utils', '--linux-app-release', '1', '--linux-rpm-license-type', 'ASL 2.0', '--linux-deb-maintainer', 'mail@sparrowwallet.com']
             imageOptions += ['--icon', 'src/main/deploy/package/linux/Sparrow.png', '--resource-dir', 'src/main/deploy/package/linux/']
         }
         if(os.macOsX) {
@@ -296,11 +264,21 @@ jlink {
             installerType = "dmg"
         }
     }
+    if(os.linux) {
+        jpackageImage {
+            dependsOn('prepareModulesDir', 'copyUdevRules')
+        }
+    }
 }
 
-tasks.jlink.finalizedBy "addUserWritePermission"
+if(os.linux) {
+    tasks.jlink.finalizedBy('addUserWritePermission', 'copyUdevRules')
+    tasks.jpackageImage.finalizedBy('prepareResourceDir')
+} else {
+    tasks.jlink.finalizedBy('addUserWritePermission')
+}
 
-task addUserWritePermission(type: Exec) {
+tasks.register('addUserWritePermission', Exec) {
     if(os.windows) {
         commandLine 'icacls', "$buildDir\\image\\legal", '/grant', 'Users:(OI)(CI)F', '/T'
     } else {
@@ -308,12 +286,48 @@ task addUserWritePermission(type: Exec) {
     }
 }
 
-task removeGroupWritePermission(type: Exec) {
+tasks.register('copyUdevRules', Copy) {
+    from('lark/src/main/resources/udev')
+    into(layout.buildDirectory.dir('image/conf/udev'))
+    include('*')
+}
+
+tasks.register('prepareResourceDir', Copy) {
+    from("src/main/deploy/package/linux${headless ? '-headless' : ''}")
+    into(layout.buildDirectory.dir('deploy/package'))
+    include('*')
+    eachFile { file ->
+        if(file.name.equals('control') || file.name.endsWith('.spec')) {
+            filter { line ->
+                if(line.contains('${size}')) {
+                    line = line.replace('${size}', getDirectorySize(layout.buildDirectory.dir('jpackage/Sparrow').get().asFile))
+                }
+                return line.replace('${version}', "${version}").replace('${arch}', osArch == 'aarch64' ? 'arm64' : 'amd64')
+            }
+        }
+    }
+}
+
+static def getDirectorySize(File directory) {
+    long size = 0
+    if(directory.isFile()) {
+        size = directory.length()
+    } else if(directory.isDirectory()) {
+        directory.eachFileRecurse { file ->
+            if(file.isFile()) {
+                size += file.length()
+            }
+        }
+    }
+    return Long.toString(size/1024 as long)
+}
+
+tasks.register('removeGroupWritePermission', Exec) {
     commandLine 'chmod', '-R', 'g-w', "$buildDir/jpackage/Sparrow"
 }
 
-task packageZipDistribution(type: Zip) {
-    archiveFileName = "Sparrow-${sparrowVersion}.zip"
+tasks.register('packageZipDistribution', Zip) {
+    archiveFileName = "Sparrow-${version}.zip"
     destinationDirectory = file("$buildDir/jpackage")
     preserveFileTimestamps = os.macOsX
     from("$buildDir/jpackage/") {
@@ -322,9 +336,9 @@ task packageZipDistribution(type: Zip) {
     }
 }
 
-task packageTarDistribution(type: Tar) {
+tasks.register('packageTarDistribution', Tar) {
     dependsOn removeGroupWritePermission
-    archiveFileName = "sparrow-${sparrowVersion}-${releaseArch}.tar.gz"
+    archiveFileName = "sparrow${headless ? 'server': 'wallet'}-${version}-${releaseArch}.tar.gz"
     destinationDirectory = file("$buildDir/jpackage")
     compression = Compression.GZIP
     from("$buildDir/jpackage/") {
@@ -360,18 +374,11 @@ extraJavaModuleInfo {
         requires('org.slf4j')
         requires('com.fasterxml.jackson.databind')
     }
-    module("com.nativelibs4java:bridj${targetName}", 'com.nativelibs4java.bridj') {
-        exports('org.bridj')
-        exports('org.bridj.cpp')
-        requires('java.logging')
-    }
-    module("com.github.sarxos:webcam-capture${targetName}", 'com.github.sarxos.webcam.capture') {
-        exports('com.github.sarxos.webcam')
-        exports('com.github.sarxos.webcam.ds.buildin')
-        exports('com.github.sarxos.webcam.ds.buildin.natives')
+    module('org.openpnp:openpnp-capture-java', 'openpnp.capture.java') {
+        exports('org.openpnp.capture')
+        exports('org.openpnp.capture.library')
         requires('java.desktop')
-        requires('com.nativelibs4java.bridj')
-        requires('org.slf4j')
+        requires('com.sun.jna')
     }
     module('de.codecentric.centerdevice:centerdevice-nsmenufx', 'centerdevice.nsmenufx') {
         exports('de.codecentric.centerdevice')
@@ -469,123 +476,22 @@ extraJavaModuleInfo {
         exports('net.coobird.thumbnailator')
         requires('java.desktop')
     }
-    module("io.matthewnelson.kotlin-components:kmp-tor-jvm", 'kmp.tor.jvm') {
-        exports('io.matthewnelson.kmp.tor')
-        requires('kmp.tor.binary.extract.jvm')
-        requires('kmp.tor.manager.jvm')
-        requires('kmp.tor.manager.common.jvm')
-        requires('kmp.tor.controller.common.jvm')
-        requires('kotlin.stdlib')
-        requires('kotlinx.coroutines.core')
-        requires('java.management')
-    }
-    if(kmpOs == "linux" && kmpArch == "arm64") {
-        module("com.sparrowwallet.kmp-tor-binary:kmp-tor-binary-${kmpOs}${kmpArch}-jvm", "kmp.tor.binary.${kmpOs}${kmpArch}") {
-            exports("io.matthewnelson.kmp.tor.resource.${kmpOs}.${kmpArch}")
-            exports("kmptor.${kmpOs}.${kmpArch}")
-        }
-    } else {
-        module("io.matthewnelson.kotlin-components:kmp-tor-binary-${kmpOs}${kmpArch}-jvm", "kmp.tor.binary.${kmpOs}${kmpArch}") {
-            exports("io.matthewnelson.kmp.tor.binary.${kmpOs}.${kmpArch}")
-            exports("kmptor.${kmpOs}.${kmpArch}")
-        }
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-binary-extract-jvm", 'kmp.tor.binary.extract.jvm') {
-        exports('io.matthewnelson.kmp.tor.binary.extract')
-        exports('io.matthewnelson.kmp.tor.binary.extract.internal')
-        requires('kotlin.stdlib')
-        requires("kmp.tor.binary.${kmpOs}${kmpArch}")
-        requires('kmp.tor.binary.geoip.jvm')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-manager-jvm", 'kmp.tor.manager.jvm') {
-        exports('io.matthewnelson.kmp.tor.manager')
-        exports('io.matthewnelson.kmp.tor.manager.util')
-        requires('kmp.tor.controller.common.jvm')
-        requires('kmp.tor.manager.common.jvm')
-        requires('kotlin.stdlib')
-        requires('kotlinx.coroutines.core')
-        requires('kotlinx.atomicfu')
-        requires('kmp.tor.controller.jvm')
-        requires('kmp.tor.common.jvm')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-manager-common-jvm", 'kmp.tor.manager.common.jvm') {
-        exports('io.matthewnelson.kmp.tor.manager.common')
-        exports('io.matthewnelson.kmp.tor.manager.common.event')
-        exports('io.matthewnelson.kmp.tor.manager.common.state')
-        requires('kmp.tor.controller.common.jvm')
-        requires('kmp.tor.common.jvm')
-        requires('kotlin.stdlib')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-controller-common-jvm", 'kmp.tor.controller.common.jvm') {
-        exports('io.matthewnelson.kmp.tor.controller.common.config')
-        exports('io.matthewnelson.kmp.tor.controller.common.file')
-        exports('io.matthewnelson.kmp.tor.controller.common.control')
-        exports('io.matthewnelson.kmp.tor.controller.common.control.usecase')
-        exports('io.matthewnelson.kmp.tor.controller.common.events')
-        exports('io.matthewnelson.kmp.tor.controller.common.exceptions')
-        requires('kmp.tor.common.jvm')
-        requires('kotlin.stdlib')
-        requires('kotlinx.atomicfu')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-common-jvm", 'kmp.tor.common.jvm') {
-        exports('io.matthewnelson.kmp.tor.common.address')
-        requires('parcelize.jvm')
-        requires('kotlin.stdlib')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-controller-jvm", 'kmp.tor.controller.jvm') {
-        exports('io.matthewnelson.kmp.tor.controller.internal.controller')
-        requires('kmp.tor.common.jvm')
-        requires('kmp.tor.controller.common.jvm')
-        requires('kotlinx.coroutines.core')
-        requires('kotlin.stdlib')
-        requires('kotlinx.atomicfu')
-        requires('encoding.core.jvm')
-        requires('encoding.base16.jvm')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-ext-callback-common-jvm", 'kmp.tor.ext.callback.common.jvm') {
-        exports('io.matthewnelson.kmp.tor.ext.callback.common')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-ext-callback-manager-jvm", 'kmp.tor.ext.callback.manager.jvm') {
-        exports('io.matthewnelson.kmp.tor.ext.callback.manager')
-        requires('kmp.tor.manager.jvm')
-        requires('kmp.tor.ext.callback.common.jvm')
-        requires('kmp.tor.ext.callback.manager.common.jvm')
-        requires('kmp.tor.ext.callback.controller.common.jvm')
-        requires('kmp.tor.manager.common.jvm')
-        requires('kmp.tor.controller.common.jvm')
-        requires('kotlin.stdlib')
-        requires('kotlinx.coroutines.core')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-ext-callback-manager-common-jvm", 'kmp.tor.ext.callback.manager.common.jvm') {
-        exports('io.matthewnelson.kmp.tor.ext.callback.manager.common')
-        requires('kmp.tor.ext.callback.controller.common.jvm')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-ext-callback-controller-common-jvm", 'kmp.tor.ext.callback.controller.common.jvm') {
-        exports('io.matthewnelson.kmp.tor.ext.callback.controller.common.control')
-        exports('io.matthewnelson.kmp.tor.ext.callback.controller.common.control.usecase')
-    }
-    module("io.matthewnelson.kotlin-components:kmp-tor-binary-geoip-jvm", 'kmp.tor.binary.geoip.jvm') {
-        exports('io.matthewnelson.kmp.tor.binary.geoip')
-        exports('kmptor')
-    }
-    module("base16-jvm-2.0.0.jar", 'encoding.base16.jvm', "2.0.0") {
-        exports('io.matthewnelson.encoding.base16')
-        requires('encoding.core.jvm')
-        requires('kotlin.stdlib')
-    }
-    module("base32-jvm-2.0.0.jar", 'encoding.base32.jvm', "2.0.0")
-    module("base64-jvm-2.0.0.jar", 'encoding.base64.jvm', "2.0.0")
-    module("core-jvm-2.0.0.jar", 'encoding.core.jvm', "2.0.0") {
-        exports('io.matthewnelson.encoding.core')
-        requires('kotlin.stdlib')
-    }
-    module("parcelize-jvm-0.1.2.jar", 'parcelize.jvm', "0.1.2") {
-        exports('io.matthewnelson.component.parcelize')
-    }
     module('org.jcommander:jcommander', 'org.jcommander') {
         exports('com.beust.jcommander')
+    }
+    module('com.sparrowwallet:hid4java', 'org.hid4java') {
+        requires('com.sun.jna')
+        exports('org.hid4java')
+        exports('org.hid4java.jna')
+    }
+    module('com.sparrowwallet:usb4java', 'org.usb4java') {
+        exports('org.usb4java')
     }
     module('com.jcraft:jzlib', 'com.jcraft.jzlib') {
         exports('com.jcraft.jzlib')
     }
+}
+
+kmpTorResourceFilterJar {
+    keepTorCompilation("current","current")
 }

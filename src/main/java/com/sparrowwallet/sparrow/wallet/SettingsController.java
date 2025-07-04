@@ -475,6 +475,10 @@ public class SettingsController extends WalletFormController implements Initiali
             return;
         }
 
+        if(AppServices.disallowAnyInvalidDerivationPaths(editedWallet)) {
+            return;
+        }
+
         boolean rederive = false;
         for(Keystore keystore : editedWallet.getKeystores()) {
             Optional<Keystore> optExisting = walletForm.getWallet().getKeystores().stream()
@@ -591,7 +595,7 @@ public class SettingsController extends WalletFormController implements Initiali
         }
 
         if(walletForm instanceof SettingsWalletForm settingsWalletForm) {
-            WalletExportDialog dlg = new WalletExportDialog(settingsWalletForm.getAppWalletForm());
+            WalletExportDialog dlg = new WalletExportDialog(settingsWalletForm.getAppWalletForm(), List.of(settingsWalletForm.getAppWalletForm()));
             dlg.initOwner(export.getScene().getWindow());
             dlg.showAndWait();
         } else {

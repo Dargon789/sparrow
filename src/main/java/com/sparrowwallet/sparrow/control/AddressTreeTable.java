@@ -77,7 +77,7 @@ public class AddressTreeTable extends CoinTreeTable {
         getColumns().forEach(col -> col.setContextMenu(contextMenu));
 
         setEditable(true);
-        setEqualPreferredColumnWidths();
+        setupColumnWidths();
 
         addressCol.setSortType(TreeTableColumn.SortType.ASCENDING);
         getSortOrder().add(addressCol);

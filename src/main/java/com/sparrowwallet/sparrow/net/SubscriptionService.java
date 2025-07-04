@@ -20,6 +20,7 @@ public class SubscriptionService {
 
     @JsonRpcMethod("blockchain.headers.subscribe")
     public void newBlockHeaderTip(@JsonRpcParam("header") final BlockHeaderTip header) {
+        ElectrumServer.updateRetrievedBlockHeaders(header.height, header.getBlockHeader());
         Platform.runLater(() -> EventManager.get().post(new NewBlockEvent(header.height, header.getBlockHeader())));
     }
 
@@ -27,8 +28,7 @@ public class SubscriptionService {
     public void scriptHashStatusUpdated(@JsonRpcParam("scripthash") final String scriptHash, @JsonRpcOptional @JsonRpcParam("status") final String status) {
         List<String> existingStatuses = ElectrumServer.getSubscribedScriptHashes().get(scriptHash);
         if(existingStatuses == null) {
-            log.debug("Received script hash status update for unsubscribed script hash: " + scriptHash);
-            ElectrumServer.updateSubscribedScriptHashStatus(scriptHash, status);
+            log.trace("Received script hash status update for non-wallet script hash: " + scriptHash);
         } else if(status != null && existingStatuses.contains(status)) {
             log.debug("Received script hash status update, but status has not changed");
             return;
@@ -38,6 +38,6 @@ public class SubscriptionService {
             existingStatuses.add(status);
         }
 
-        Platform.runLater(() -> EventManager.get().post(new WalletNodeHistoryChangedEvent(scriptHash)));
+        Platform.runLater(() -> EventManager.get().post(new WalletNodeHistoryChangedEvent(scriptHash, status)));
     }
 }

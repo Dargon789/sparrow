@@ -3,19 +3,18 @@ package com.sparrowwallet.sparrow.control;
 import com.sparrowwallet.drongo.KeyPurpose;
 import com.sparrowwallet.drongo.OsType;
 import com.sparrowwallet.drongo.address.Address;
+import com.sparrowwallet.drongo.bip47.PaymentCode;
 import com.sparrowwallet.drongo.protocol.Sha256Hash;
 import com.sparrowwallet.drongo.protocol.TransactionOutput;
 import com.sparrowwallet.drongo.uri.BitcoinURI;
 import com.sparrowwallet.drongo.wallet.*;
-import com.sparrowwallet.sparrow.UnitFormat;
-import com.sparrowwallet.sparrow.AppServices;
-import com.sparrowwallet.sparrow.EventManager;
-import com.sparrowwallet.sparrow.Theme;
+import com.sparrowwallet.sparrow.*;
 import com.sparrowwallet.sparrow.event.ExcludeUtxoEvent;
 import com.sparrowwallet.sparrow.event.ReplaceChangeAddressEvent;
 import com.sparrowwallet.sparrow.glyphfont.FontAwesome5;
 import com.sparrowwallet.sparrow.glyphfont.GlyphUtils;
 import com.sparrowwallet.sparrow.io.Config;
+import com.sparrowwallet.sparrow.net.ExchangeSource;
 import com.sparrowwallet.sparrow.wallet.OptimizationStrategy;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ObjectProperty;
@@ -39,10 +38,7 @@ import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
 import javafx.scene.shape.CubicCurve;
 import javafx.scene.shape.Line;
-import javafx.stage.FileChooser;
-import javafx.stage.Modality;
-import javafx.stage.Stage;
-import javafx.stage.StageStyle;
+import javafx.stage.*;
 import javafx.util.Duration;
 import org.controlsfx.glyphfont.Glyph;
 
@@ -230,6 +226,13 @@ public class TransactionDiagram extends GridPane {
 
         getChildren().clear();
         getChildren().addAll(inputsTypePane, inputsPane, inputsLinesPane, txPane, outputsLinesPane, outputsPane);
+
+        List<Payment> userPayments = getUserPayments();
+        if(!isFinal() && userPayments.size() > 1) {
+            Pane totalsPane = getTotalsPane(userPayments);
+            GridPane.setConstraints(totalsPane, 2, 0, 3, 1);
+            getChildren().add(totalsPane);
+        }
 
         if(contextMenu == null) {
             contextMenu = new ContextMenu();
@@ -432,8 +435,14 @@ public class TransactionDiagram extends GridPane {
                 if(walletNode != null) {
                     inputValue = input.getValue();
                     Wallet nodeWallet = walletNode.getWallet();
-                    tooltip.setText("Spending " + getSatsValue(inputValue) + " sats from " + (isFinal() ? nodeWallet.getFullDisplayName() : (nodeWallet.isNested() ? nodeWallet.getDisplayName() : "")) + " " + walletNode + "\n" +
-                            input.getHashAsString() + ":" + input.getIndex() + "\n" + walletNode.getAddress());
+                    StringJoiner joiner = new StringJoiner("\n");
+                    joiner.add("Spending " + getSatsValue(inputValue) + " sats from " + (isFinal() ? nodeWallet.getFullDisplayName() : (nodeWallet.isNested() ? nodeWallet.getDisplayName() : "")) + " " + walletNode);
+                    joiner.add(input.getHashAsString() + ":" + input.getIndex());
+                    joiner.add(walletNode.getAddress().toString());
+                    if(input.getLabel() != null) {
+                        joiner.add(input.getLabel());
+                    }
+                    tooltip.setText(joiner.toString());
                     tooltip.getStyleClass().add("input-label");
 
                     if(input.getLabel() == null || input.getLabel().isEmpty()) {
@@ -484,6 +493,11 @@ public class TransactionDiagram extends GridPane {
                 }
                 tooltip.setShowDelay(new Duration(TOOLTIP_SHOW_DELAY));
                 tooltip.setShowDuration(Duration.INDEFINITE);
+                tooltip.setWrapText(true);
+                Window activeWindow = AppServices.getActiveWindow();
+                if(activeWindow != null) {
+                    tooltip.setMaxWidth(activeWindow.getWidth());
+                }
                 if(!tooltip.getText().isEmpty()) {
                     label.setTooltip(tooltip);
                 }
@@ -607,6 +621,10 @@ public class TransactionDiagram extends GridPane {
         }
     }
 
+    private List<Payment> getUserPayments() {
+        return walletTx.getPayments().stream().filter(payment -> payment.getType() == Payment.Type.DEFAULT || payment.getType() == Payment.Type.ANCHOR).toList();
+    }
+
     private Pane getOutputsLines(List<Payment> displayedPayments) {
         VBox pane = new VBox();
         Group group = new Group();
@@ -667,7 +685,7 @@ public class TransactionDiagram extends GridPane {
         List<OutputNode> outputNodes = new ArrayList<>();
         for(Payment payment : displayedPayments) {
             Glyph outputGlyph = GlyphUtils.getOutputGlyph(walletTx, payment);
-            boolean labelledPayment = outputGlyph.getStyleClass().stream().anyMatch(style -> List.of("premix-icon", "badbank-icon", "whirlpoolfee-icon").contains(style)) || payment instanceof AdditionalPayment;
+            boolean labelledPayment = outputGlyph.getStyleClass().stream().anyMatch(style -> List.of("premix-icon", "badbank-icon", "whirlpoolfee-icon", "anchor-icon").contains(style)) || payment instanceof AdditionalPayment || payment.getLabel() != null;
             Label recipientLabel = new Label(payment.getLabel() == null || payment.getType() == Payment.Type.FAKE_MIX || payment.getType() == Payment.Type.MIX ? payment.getAddress().toString().substring(0, 8) + "..." : payment.getLabel(), outputGlyph);
             recipientLabel.getStyleClass().add("output-label");
             recipientLabel.getStyleClass().add(labelledPayment ? "payment-label" : "recipient-label");
@@ -681,6 +699,11 @@ public class TransactionDiagram extends GridPane {
             recipientTooltip.getStyleClass().add("recipient-label");
             recipientTooltip.setShowDelay(new Duration(TOOLTIP_SHOW_DELAY));
             recipientTooltip.setShowDuration(Duration.INDEFINITE);
+            recipientTooltip.setWrapText(true);
+            Window activeWindow = AppServices.getActiveWindow();
+            if(activeWindow != null) {
+                recipientTooltip.setMaxWidth(activeWindow.getWidth());
+            }
             recipientLabel.setTooltip(recipientTooltip);
             HBox paymentBox = new HBox();
             paymentBox.setAlignment(Pos.CENTER_LEFT);
@@ -696,7 +719,9 @@ public class TransactionDiagram extends GridPane {
                 paymentBox.getChildren().addAll(region, amountLabel);
             }
 
-            outputNodes.add(new OutputNode(paymentBox, payment.getAddress(), payment.getAmount()));
+            Wallet bip47Wallet = toWallet != null && toWallet.isBip47() ? toWallet : (toBip47Wallet != null && toBip47Wallet.isBip47() ? toBip47Wallet : null);
+            PaymentCode paymentCode = bip47Wallet == null ? null : bip47Wallet.getKeystores().getFirst().getExternalPaymentCode();
+            outputNodes.add(new OutputNode(paymentBox, payment.getAddress(), payment.getAmount(), paymentCode));
         }
 
         Set<Integer> seenIndexes = new HashSet<>();
@@ -760,7 +785,7 @@ public class TransactionDiagram extends GridPane {
             outputsBox.getChildren().add(outputNode.outputLabel);
             outputsBox.getChildren().add(createSpacer());
 
-            ContextMenu contextMenu = new LabelContextMenu(outputNode.address, outputNode.amount);
+            ContextMenu contextMenu = new LabelContextMenu(outputNode.address, outputNode.amount, outputNode.paymentCode);
             if(!outputNode.outputLabel.getChildren().isEmpty() && outputNode.outputLabel.getChildren().get(0) instanceof Label outputLabelControl) {
                 outputLabelControl.setContextMenu(contextMenu);
             }
@@ -769,7 +794,7 @@ public class TransactionDiagram extends GridPane {
         boolean highFee = (walletTx.getFeePercentage() > 0.1);
         Label feeLabel = highFee ? new Label("High Fee", getFeeWarningGlyph()) : new Label("Fee", getFeeGlyph());
         feeLabel.getStyleClass().addAll("output-label", "fee-label");
-        String percentage = String.format("%.2f", walletTx.getFeePercentage() * 100.0);
+        String percentage = walletTx.getFeePercentage() < 0.0001d ? "<0.01" : String.format("%.2f", walletTx.getFeePercentage() * 100.0);
         Tooltip feeTooltip = new Tooltip(walletTx.getFee() < 0 ? "Unknown fee" : "Fee of " + getSatsValue(walletTx.getFee()) + " sats (" + percentage + "%)");
         feeTooltip.getStyleClass().add("fee-tooltip");
         feeTooltip.setShowDelay(new Duration(TOOLTIP_SHOW_DELAY));
@@ -821,6 +846,33 @@ public class TransactionDiagram extends GridPane {
         txPane.getChildren().add(createSpacer());
 
         return txPane;
+    }
+
+    private Pane getTotalsPane(List<Payment> userPayments) {
+        VBox totalsBox = new VBox();
+        totalsBox.setPadding(new Insets(0, 0, 15, 0));
+        totalsBox.setAlignment(Pos.CENTER);
+
+        long amount = userPayments.stream().mapToLong(Payment::getAmount).sum();
+
+        HBox coinLabelBox = new HBox();
+        coinLabelBox.setAlignment(Pos.CENTER);
+        CoinLabel totalCoinLabel = new CoinLabel();
+        totalCoinLabel.setValue(amount);
+        coinLabelBox.getChildren().addAll(totalCoinLabel, new Label(" in "), new Label(Long.toString(userPayments.size())), new Label(" payments"));
+        totalsBox.getChildren().addAll(createSpacer(), coinLabelBox);
+
+        CurrencyRate currencyRate = AppServices.getFiatCurrencyExchangeRate();
+        if(currencyRate != null && currencyRate.isAvailable() && Config.get().getExchangeSource() != ExchangeSource.NONE) {
+            HBox fiatLabelBox = new HBox();
+            fiatLabelBox.setAlignment(Pos.CENTER);
+            FiatLabel fiatLabel = new FiatLabel();
+            fiatLabel.set(currencyRate, amount);
+            fiatLabelBox.getChildren().add(fiatLabel);
+            totalsBox.getChildren().add(fiatLabelBox);
+        }
+
+        return totalsBox;
     }
 
     private void saveAsImage() {
@@ -1067,16 +1119,26 @@ public class TransactionDiagram extends GridPane {
         public Pane outputLabel;
         public Address address;
         public long amount;
+        public PaymentCode paymentCode;
 
         public OutputNode(Pane outputLabel, Address address, long amount) {
+            this(outputLabel, address, amount, null);
+        }
+
+        public OutputNode(Pane outputLabel, Address address, long amount, PaymentCode paymentCode) {
             this.outputLabel = outputLabel;
             this.address = address;
             this.amount = amount;
+            this.paymentCode = paymentCode;
         }
     }
 
     private class LabelContextMenu extends ContextMenu {
         public LabelContextMenu(Address address, long value) {
+            this(address, value, null);
+        }
+
+        public LabelContextMenu(Address address, long value, PaymentCode paymentCode) {
             if(address != null) {
                 MenuItem copyAddress = new MenuItem("Copy Address");
                 copyAddress.setOnAction(event -> {
@@ -1113,6 +1175,17 @@ public class TransactionDiagram extends GridPane {
                 Clipboard.getSystemClipboard().setContent(content);
             });
             getItems().addAll(copySatsValue, copyBtcValue);
+
+            if(paymentCode != null) {
+                MenuItem copyPaymentCode = new MenuItem("Copy Payment Code");
+                copyPaymentCode.setOnAction(AE -> {
+                    hide();
+                    ClipboardContent content = new ClipboardContent();
+                    content.putString(paymentCode.toString());
+                    Clipboard.getSystemClipboard().setContent(content);
+                });
+                getItems().add(copyPaymentCode);
+            }
         }
     }
 }

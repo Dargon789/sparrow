@@ -1,11 +1,11 @@
 package com.sparrowwallet.sparrow.control;
 
+import com.sparrowwallet.drongo.wallet.TableType;
 import com.sparrowwallet.sparrow.wallet.Entry;
 import com.sparrowwallet.sparrow.wallet.TransactionEntry;
 import com.sparrowwallet.sparrow.wallet.WalletTransactionsEntry;
 import javafx.beans.property.ReadOnlyObjectWrapper;
 import javafx.scene.control.TreeTableColumn;
-import javafx.scene.control.TreeTableView;
 
 public class TransactionsTreeTable extends CoinTreeTable {
     public void initialize(WalletTransactionsEntry rootEntry) {
@@ -49,8 +49,8 @@ public class TransactionsTreeTable extends CoinTreeTable {
 
         setPlaceholder(getDefaultPlaceholder(rootEntry.getWallet()));
         setEditable(true);
-        setEqualPreferredColumnWidths();
-        setSortColumn(0, TreeTableColumn.SortType.DESCENDING);
+        setupColumnWidths();
+        setupColumnSort(0, TreeTableColumn.SortType.DESCENDING);
     }
 
     public void updateAll(WalletTransactionsEntry rootEntry) {
@@ -60,13 +60,13 @@ public class TransactionsTreeTable extends CoinTreeTable {
         setRoot(rootItem);
         rootItem.setExpanded(true);
 
-        setSortColumn(0, TreeTableColumn.SortType.DESCENDING);
+        resetSortColumn();
     }
 
     public void updateHistory() {
         //Transaction entries should have already been updated using WalletTransactionsEntry.updateHistory, so only a resort required
         sort();
-        setSortColumn(0, TreeTableColumn.SortType.DESCENDING);
+        resetSortColumn();
     }
 
     public void updateLabel(Entry entry) {

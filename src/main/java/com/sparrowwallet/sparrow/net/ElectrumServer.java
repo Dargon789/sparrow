@@ -12,6 +12,7 @@ import com.sparrowwallet.drongo.bip47.PaymentCode;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.wallet.*;
 import com.sparrowwallet.sparrow.AppServices;
+import com.sparrowwallet.sparrow.BlockSummary;
 import com.sparrowwallet.sparrow.EventManager;
 import com.sparrowwallet.sparrow.event.*;
 import com.sparrowwallet.sparrow.io.Config;
@@ -26,17 +27,21 @@ import javafx.beans.property.SimpleIntegerProperty;
 import javafx.concurrent.ScheduledService;
 import javafx.concurrent.Service;
 import javafx.concurrent.Task;
+import javafx.util.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 public class ElectrumServer {
     private static final Logger log = LoggerFactory.getLogger(ElectrumServer.class);
@@ -47,6 +52,8 @@ public class ElectrumServer {
 
     private static final Version FULCRUM_MIN_BATCHING_VERSION = new Version("1.6.0");
 
+    private static final Version MEMPOOL_ELECTRS_MIN_BATCHING_VERSION = new Version("3.1.0");
+
     public static final String CORE_ELECTRUM_HOST = "127.0.0.1";
 
     private static final int MINIMUM_BROADCASTS = 2;
@@ -55,21 +62,31 @@ public class ElectrumServer {
 
     private static CloseableTransport transport;
 
-    private static final Map<String, List<String>> subscribedScriptHashes = Collections.synchronizedMap(new HashMap<>());
+    private static final Map<String, List<String>> subscribedScriptHashes = new ConcurrentHashMap<>();
 
     private static Server previousServer;
 
-    private static Map<String, String> retrievedScriptHashes = Collections.synchronizedMap(new HashMap<>());
+    private static final Map<String, String> retrievedScriptHashes = Collections.synchronizedMap(new HashMap<>());
 
-    private static Map<Sha256Hash, BlockTransaction> retrievedTransactions = Collections.synchronizedMap(new HashMap<>());
+    private static final Map<Sha256Hash, BlockTransaction> retrievedTransactions = new ConcurrentHashMap<>();
 
-    private static Set<String> sameHeightTxioScriptHashes = Collections.synchronizedSet(new HashSet<>());
+    private static final Map<Integer, BlockHeader> retrievedBlockHeaders = new ConcurrentHashMap<>();
+
+    private static final Map<Sha256Hash, BlockTransaction> broadcastedTransactions = new ConcurrentHashMap<>();
+
+    private static final Set<String> sameHeightTxioScriptHashes = ConcurrentHashMap.newKeySet();
+
+    private final static Map<String, Integer> subscribedRecent = new ConcurrentHashMap<>();
+
+    private final static Map<String, String> broadcastRecent = new ConcurrentHashMap<>();
 
     private static ElectrumServerRpc electrumServerRpc = new SimpleElectrumServerRpc();
 
     private static Cormorant cormorant;
 
     private static Server coreElectrumServer;
+
+    private static ServerCapability serverCapability;
 
     private static final Pattern RPC_WALLET_LOADING_PATTERN = Pattern.compile(".*\"(Wallet loading failed[:.][^\"]*)\".*");
 
@@ -111,12 +128,14 @@ public class ElectrumServer {
                 if(previousServer != null && !electrumServer.equals(previousServer)) {
                     retrievedScriptHashes.clear();
                     retrievedTransactions.clear();
+                    retrievedBlockHeaders.clear();
                     TransactionHistoryService.walletLocks.values().forEach(walletLock -> walletLock.initialized = false);
                 }
                 previousServer = electrumServer;
 
                 HostAndPort hostAndPort = electrumServer.getHostAndPort();
-                boolean localNetworkAddress = !protocol.isOnionAddress(hostAndPort) && IpAddressMatcher.isLocalNetworkAddress(hostAndPort.getHost());
+                boolean localNetworkAddress = !Protocol.isOnionAddress(hostAndPort) && !PublicElectrumServer.isPublicServer(hostAndPort)
+                        && IpAddressMatcher.isLocalNetworkAddress(hostAndPort.getHost());
 
                 if(!localNetworkAddress && Config.get().isUseProxy() && proxyServer != null && !proxyServer.isBlank()) {
                     HostAndPort proxy = HostAndPort.fromString(proxyServer);
@@ -218,6 +237,11 @@ public class ElectrumServer {
     }
 
     private static String getScriptHashStatus(String scriptHash, WalletNode walletNode) {
+        List<ScriptHashTx> scriptHashTxes = getScriptHashes(scriptHash, walletNode);
+        return getScriptHashStatus(scriptHashTxes);
+    }
+
+    private static List<ScriptHashTx> getScriptHashes(String scriptHash, WalletNode walletNode) {
         List<BlockTransactionHashIndex> txos  = new ArrayList<>(walletNode.getTransactionOutputs());
         txos.addAll(walletNode.getTransactionOutputs().stream().filter(BlockTransactionHashIndex::isSpent).map(BlockTransactionHashIndex::getSpentBy).collect(Collectors.toList()));
         Set<Sha256Hash> unique = new HashSet<>(txos.size());
@@ -240,10 +264,15 @@ public class ElectrumServer {
             sameHeightTxioScriptHashes.add(scriptHash);
             return 0;
         });
-        if(!txos.isEmpty()) {
+
+        return txos.stream().map(txo -> new ScriptHashTx(txo.getHeight(), txo.getHashAsString(), txo.getFee() == null ? 0 : txo.getFee())).toList();
+    }
+
+    private static String getScriptHashStatus(List<ScriptHashTx> scriptHashTxes) {
+        if(!scriptHashTxes.isEmpty()) {
             StringBuilder scriptHashStatus = new StringBuilder();
-            for(BlockTransactionHashIndex txo : txos) {
-                scriptHashStatus.append(txo.getHash().toString()).append(":").append(txo.getHeight()).append(":");
+            for(ScriptHashTx scriptHashTx : scriptHashTxes) {
+                scriptHashStatus.append(scriptHashTx.tx_hash).append(":").append(scriptHashTx.height).append(":");
             }
 
             return Utils.bytesToHex(Sha256Hash.hash(scriptHashStatus.toString().getBytes(StandardCharsets.UTF_8)));
@@ -387,10 +416,12 @@ public class ElectrumServer {
 
     public void getReferences(Wallet wallet, Collection<WalletNode> nodes, Map<WalletNode, Set<BlockTransactionHash>> nodeTransactionMap, int startIndex) throws ServerException {
         try {
+            Map<WalletNode, ScriptHashTx[]> nodeHashHistory = new LinkedHashMap<>(nodes.size());
             Map<String, String> pathScriptHashes = new LinkedHashMap<>(nodes.size());
             for(WalletNode node : nodes) {
                 if(node.getIndex() >= startIndex) {
                     pathScriptHashes.put(node.getDerivationPath(), getScriptHash(node));
+                    nodeHashHistory.put(node, null);
                 }
             }
 
@@ -398,43 +429,95 @@ public class ElectrumServer {
                 return;
             }
 
-            //Even if we have some successes, failure to retrieve all references will result in an incomplete wallet history. Don't proceed if that's the case.
-            Map<String, ScriptHashTx[]> result = electrumServerRpc.getScriptHashHistory(getTransport(), wallet, pathScriptHashes, true);
+            //Optimistic optimizations from guessing the script hash status based on known information
+            for(Map.Entry<WalletNode, ScriptHashTx[]> entry : nodeHashHistory.entrySet()) {
+                WalletNode node = entry.getKey();
+                String scriptHash = pathScriptHashes.get(node.getDerivationPath());
+                List<String> statuses = subscribedScriptHashes.get(scriptHash);
 
-            for(String path : result.keySet()) {
-                ScriptHashTx[] txes = result.get(path);
+                if(statuses != null && !statuses.isEmpty()) {
+                    //Optimize for new transactions that have been recently broadcasted
+                    for(Sha256Hash txid : broadcastedTransactions.keySet()) {
+                        BlockTransaction blkTx = broadcastedTransactions.get(txid);
+                        if(blkTx.getTransaction().getOutputs().stream().map(ElectrumServer::getScriptHash).anyMatch(scriptHash::equals) ||
+                            blkTx.getTransaction().getInputs().stream().map(txInput -> getPrevOutput(wallet, txInput))
+                                    .filter(Objects::nonNull).map(ElectrumServer::getScriptHash).anyMatch(scriptHash::equals)) {
+                            List<ScriptHashTx> scriptHashTxes = new ArrayList<>(getScriptHashes(scriptHash, node));
+                            scriptHashTxes.add(new ScriptHashTx(0, txid.toString(), blkTx.getFee() == null ? 0 : blkTx.getFee()));
 
-                Optional<WalletNode> optionalNode = nodes.stream().filter(n -> n.getDerivationPath().equals(path)).findFirst();
-                if(optionalNode.isPresent()) {
-                    WalletNode node = optionalNode.get();
+                            String status = getScriptHashStatus(scriptHashTxes);
+                            if(Objects.equals(status, statuses.getLast())) {
+                                entry.setValue(scriptHashTxes.toArray(new ScriptHashTx[0]));
+                                pathScriptHashes.remove(node.getDerivationPath());
+                            }
+                        }
+                    }
 
-                    //Some servers can return the same tx as multiple ScriptHashTx entries with different heights. Take the highest height only
-                    Set<BlockTransactionHash> references = Arrays.stream(txes).map(ScriptHashTx::getBlockchainTransactionHash)
-                            .collect(TreeSet::new, (set, ref) -> {
-                                Optional<BlockTransactionHash> optExisting = set.stream().filter(prev -> prev.getHash().equals(ref.getHash())).findFirst();
-                                if(optExisting.isPresent()) {
-                                    if(optExisting.get().getHeight() < ref.getHeight()) {
-                                        set.remove(optExisting.get());
-                                        set.add(ref);
-                                    }
-                                } else {
+                    //Optimize for new confirmations should all pending transactions confirm at the current block height
+                    if(entry.getValue() == null && AppServices.getCurrentBlockHeight() != null &&
+                            node.getTransactionOutputs().stream().flatMap(txo -> txo.isSpent() ? Stream.of(txo, txo.getSpentBy()) : Stream.of(txo))
+                                    .anyMatch(txo -> txo.getHeight() <= 0)) {
+                        List<ScriptHashTx> scriptHashTxes = getScriptHashes(scriptHash, node);
+                        for(ScriptHashTx scriptHashTx : scriptHashTxes) {
+                            if(scriptHashTx.height <= 0) {
+                                scriptHashTx.height = AppServices.getCurrentBlockHeight();
+                                scriptHashTx.fee = 0;
+                            }
+                        }
+
+                        String status = getScriptHashStatus(scriptHashTxes);
+                        if(Objects.equals(status, statuses.getLast())) {
+                            entry.setValue(scriptHashTxes.toArray(new ScriptHashTx[0]));
+                            pathScriptHashes.remove(node.getDerivationPath());
+                        }
+                    }
+                }
+            }
+
+            if(!pathScriptHashes.isEmpty()) {
+                //Even if we have some successes, failure to retrieve all references will result in an incomplete wallet history. Don't proceed if that's the case.
+                Map<String, ScriptHashTx[]> result = electrumServerRpc.getScriptHashHistory(getTransport(), wallet, pathScriptHashes, true);
+
+                for(String path : result.keySet()) {
+                    ScriptHashTx[] txes = result.get(path);
+
+                    Optional<WalletNode> optionalNode = nodes.stream().filter(n -> n.getDerivationPath().equals(path)).findFirst();
+                    if(optionalNode.isPresent()) {
+                        WalletNode node = optionalNode.get();
+                        nodeHashHistory.put(node, txes);
+                    }
+                }
+            }
+
+            for(WalletNode node : nodeHashHistory.keySet()) {
+                ScriptHashTx[] txes = nodeHashHistory.get(node);
+
+                //Some servers can return the same tx as multiple ScriptHashTx entries with different heights. Take the highest height only
+                Set<BlockTransactionHash> references = Arrays.stream(txes).map(ScriptHashTx::getBlockchainTransactionHash)
+                        .collect(TreeSet::new, (set, ref) -> {
+                            Optional<BlockTransactionHash> optExisting = set.stream().filter(prev -> prev.getHash().equals(ref.getHash())).findFirst();
+                            if(optExisting.isPresent()) {
+                                if(optExisting.get().getHeight() < ref.getHeight()) {
+                                    set.remove(optExisting.get());
                                     set.add(ref);
                                 }
-                            }, TreeSet::addAll);
-                    Set<BlockTransactionHash> existingReferences = nodeTransactionMap.get(node);
+                            } else {
+                                set.add(ref);
+                            }
+                        }, TreeSet::addAll);
+                Set<BlockTransactionHash> existingReferences = nodeTransactionMap.get(node);
 
-                    if(existingReferences == null) {
-                        nodeTransactionMap.put(node, references);
-                    } else {
-                        for(BlockTransactionHash reference : references) {
-                            if(!existingReferences.add(reference)) {
-                                Optional<BlockTransactionHash> optionalReference = existingReferences.stream().filter(tr -> tr.getHash().equals(reference.getHash())).findFirst();
-                                if(optionalReference.isPresent()) {
-                                    BlockTransactionHash existingReference = optionalReference.get();
-                                    if(existingReference.getHeight() < reference.getHeight()) {
-                                        existingReferences.remove(existingReference);
-                                        existingReferences.add(reference);
-                                    }
+                if(existingReferences == null) {
+                    nodeTransactionMap.put(node, references);
+                } else {
+                    for(BlockTransactionHash reference : references) {
+                        if(!existingReferences.add(reference)) {
+                            Optional<BlockTransactionHash> optionalReference = existingReferences.stream().filter(tr -> tr.getHash().equals(reference.getHash())).findFirst();
+                            if(optionalReference.isPresent()) {
+                                BlockTransactionHash existingReference = optionalReference.get();
+                                if(existingReference.getHeight() < reference.getHeight()) {
+                                    existingReferences.remove(existingReference);
+                                    existingReferences.add(reference);
                                 }
                             }
                         }
@@ -552,50 +635,66 @@ public class ElectrumServer {
     }
 
     public void getReferencedTransactions(Wallet wallet, Map<WalletNode, Set<BlockTransactionHash>> nodeTransactionMap) throws ServerException {
-        Set<BlockTransactionHash> references = new TreeSet<>();
+        Map<BlockTransactionHash, Transaction> references = new TreeMap<>();
         for(Set<BlockTransactionHash> nodeReferences : nodeTransactionMap.values()) {
-            references.addAll(nodeReferences);
+            for(BlockTransactionHash nodeReference : nodeReferences) {
+                references.put(nodeReference, null);
+            }
         }
 
-        for(Iterator<BlockTransactionHash> iter = references.iterator(); iter.hasNext(); ) {
-            BlockTransactionHash reference = iter.next();
-            BlockTransaction blockTransaction = wallet.getTransactions().get(reference.getHash());
-            if(blockTransaction != null && reference.getHeight() == blockTransaction.getHeight()) {
-                iter.remove();
+        for(Iterator<Map.Entry<BlockTransactionHash, Transaction>> iter = references.entrySet().iterator(); iter.hasNext(); ) {
+            Map.Entry<BlockTransactionHash, Transaction> entry = iter.next();
+            BlockTransactionHash reference = entry.getKey();
+            BlockTransaction blockTransaction = wallet.getWalletTransaction(reference.getHash());
+            if(blockTransaction != null) {
+                if(reference.getHeight() == blockTransaction.getHeight()) {
+                    iter.remove();
+                } else {
+                    entry.setValue(blockTransaction.getTransaction());
+                }
+            } else if(broadcastedTransactions.containsKey(reference.getHash())) {
+                entry.setValue(broadcastedTransactions.get(reference.getHash()).getTransaction());
             }
         }
 
         Map<Sha256Hash, BlockTransaction> transactionMap = new HashMap<>();
         if(!references.isEmpty()) {
-            Map<Integer, BlockHeader> blockHeaderMap = getBlockHeaders(wallet, references);
+            Map<Integer, BlockHeader> blockHeaderMap = getBlockHeaders(wallet, references.keySet());
             transactionMap = getTransactions(wallet, references, blockHeaderMap);
         }
 
         if(!transactionMap.equals(wallet.getTransactions())) {
             wallet.updateTransactions(transactionMap);
+            broadcastedTransactions.keySet().removeAll(transactionMap.entrySet().stream().filter(entry -> entry.getValue().getHeight() > 0)
+                    .map(Map.Entry::getKey).collect(Collectors.toSet()));
         }
     }
 
     public Map<Integer, BlockHeader> getBlockHeaders(Wallet wallet, Set<BlockTransactionHash> references) throws ServerException {
         try {
+            Map<Integer, BlockHeader> blockHeaderMap = new TreeMap<>();
             Set<Integer> blockHeights = new TreeSet<>();
             for(BlockTransactionHash reference : references) {
                 if(reference.getHeight() > 0) {
-                    blockHeights.add(reference.getHeight());
+                    if(retrievedBlockHeaders.containsKey(reference.getHeight())) {
+                        blockHeaderMap.put(reference.getHeight(), retrievedBlockHeaders.get(reference.getHeight()));
+                    } else {
+                        blockHeights.add(reference.getHeight());
+                    }
                 }
             }
 
             if(blockHeights.isEmpty()) {
-                return Collections.emptyMap();
+                return blockHeaderMap;
             }
 
             Map<Integer, String> result = electrumServerRpc.getBlockHeaders(getTransport(), wallet, blockHeights);
 
-            Map<Integer, BlockHeader> blockHeaderMap = new TreeMap<>();
             for(Integer height : result.keySet()) {
                 byte[] blockHeaderBytes = Utils.hexToBytes(result.get(height));
                 BlockHeader blockHeader = new BlockHeader(blockHeaderBytes);
                 blockHeaderMap.put(height, blockHeader);
+                updateRetrievedBlockHeaders(height, blockHeader);
                 blockHeights.remove(height);
             }
 
@@ -613,51 +712,61 @@ public class ElectrumServer {
         }
     }
 
-    public Map<Sha256Hash, BlockTransaction> getTransactions(Wallet wallet, Set<BlockTransactionHash> references, Map<Integer, BlockHeader> blockHeaderMap) throws ServerException {
+    public Map<Sha256Hash, BlockTransaction> getTransactions(Wallet wallet, Map<BlockTransactionHash, Transaction> references, Map<Integer, BlockHeader> blockHeaderMap) throws ServerException {
         try {
-            Set<BlockTransactionHash> checkReferences = new TreeSet<>(references);
+            Map<Sha256Hash, BlockTransaction> transactionMap = new HashMap<>();
+            Set<BlockTransactionHash> checkReferences = new TreeSet<>(references.keySet());
 
             Set<String> txids = new LinkedHashSet<>(references.size());
-            for(BlockTransactionHash reference : references) {
-                txids.add(reference.getHashAsString());
+            for(BlockTransactionHash reference : references.keySet()) {
+                if(references.get(reference) == null) {
+                    txids.add(reference.getHashAsString());
+                }
             }
 
-            Map<String, String> result = electrumServerRpc.getTransactions(getTransport(), wallet, txids);
+            if(!txids.isEmpty()) {
+                Map<String, String> result = electrumServerRpc.getTransactions(getTransport(), wallet, txids);
 
-            String strErrorTx = Sha256Hash.ZERO_HASH.toString();
-            Map<Sha256Hash, BlockTransaction> transactionMap = new HashMap<>();
-            for(String txid : result.keySet()) {
-                Sha256Hash hash = Sha256Hash.wrap(txid);
-                String strRawTx = result.get(txid);
+                String strErrorTx = Sha256Hash.ZERO_HASH.toString();
+                for(String txid : result.keySet()) {
+                    Sha256Hash hash = Sha256Hash.wrap(txid);
+                    String strRawTx = result.get(txid);
 
-                if(strRawTx.equals(strErrorTx)) {
-                    transactionMap.put(hash, UNFETCHABLE_BLOCK_TRANSACTION);
-                    checkReferences.removeIf(ref -> ref.getHash().equals(hash));
-                    continue;
+                    if(strRawTx.equals(strErrorTx)) {
+                        transactionMap.put(hash, UNFETCHABLE_BLOCK_TRANSACTION);
+                        checkReferences.removeIf(ref -> ref.getHash().equals(hash));
+                        continue;
+                    }
+
+                    byte[] rawtx = Utils.hexToBytes(strRawTx);
+                    Transaction transaction;
+
+                    try {
+                        transaction = new Transaction(rawtx);
+                    } catch(ProtocolException e) {
+                        log.error("Could not parse tx: " + strRawTx);
+                        continue;
+                    }
+
+                    Optional<BlockTransactionHash> optionalReference = references.keySet().stream().filter(reference -> reference.getHash().equals(hash)).findFirst();
+                    if(optionalReference.isEmpty()) {
+                        throw new IllegalStateException("Returned transaction " + hash.toString() + " that was not requested");
+                    }
+                    BlockTransactionHash reference = optionalReference.get();
+
+                    references.put(reference, transaction);
                 }
+            }
 
-                byte[] rawtx = Utils.hexToBytes(strRawTx);
-                Transaction transaction;
-
-                try {
-                    transaction = new Transaction(rawtx);
-                } catch(ProtocolException e) {
-                    log.error("Could not parse tx: " + strRawTx);
-                    continue;
-                }
-
-                Optional<BlockTransactionHash> optionalReference = references.stream().filter(reference -> reference.getHash().equals(hash)).findFirst();
-                if(optionalReference.isEmpty()) {
-                    throw new IllegalStateException("Returned transaction " + hash.toString() + " that was not requested");
-                }
-                BlockTransactionHash reference = optionalReference.get();
+            for(BlockTransactionHash reference : references.keySet()) {
+                Transaction transaction = references.get(reference);
 
                 Date blockDate = null;
                 if(reference.getHeight() > 0) {
                     BlockHeader blockHeader = blockHeaderMap.get(reference.getHeight());
                     if(blockHeader == null) {
-                        transactionMap.put(hash, UNFETCHABLE_BLOCK_TRANSACTION);
-                        checkReferences.removeIf(ref -> ref.getHash().equals(hash));
+                        transactionMap.put(reference.getHash(), UNFETCHABLE_BLOCK_TRANSACTION);
+                        checkReferences.removeIf(ref -> ref.getHash().equals(reference.getHash()));
                         continue;
                     }
                     blockDate = blockHeader.getTimeAsDate();
@@ -665,7 +774,7 @@ public class ElectrumServer {
 
                 BlockTransaction blockchainTransaction = new BlockTransaction(reference.getHash(), reference.getHeight(), blockDate, reference.getFee(), transaction);
 
-                transactionMap.put(hash, blockchainTransaction);
+                transactionMap.put(reference.getHash(), blockchainTransaction);
                 checkReferences.remove(reference);
             }
 
@@ -831,6 +940,20 @@ public class ElectrumServer {
         return targetBlocksFeeRatesSats;
     }
 
+    public Double getNextBlockMedianFeeRate() {
+        FeeRatesSource feeRatesSource = Config.get().getFeeRatesSource();
+        feeRatesSource = (feeRatesSource == null ? FeeRatesSource.MEMPOOL_SPACE : feeRatesSource);
+        if(feeRatesSource.supportsNetwork(Network.get())) {
+            try {
+                return feeRatesSource.getNextBlockMedianFeeRate();
+            } catch(Exception e) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
     public Map<Integer, Double> getDefaultFeeEstimates(List<Integer> targetBlocks) throws ServerException {
         try {
             Map<Integer, Double> targetBlocksFeeRatesBtcKb = electrumServerRpc.getFeeEstimates(getTransport(), targetBlocks);
@@ -871,6 +994,101 @@ public class ElectrumServer {
         }
 
         return Transaction.DEFAULT_MIN_RELAY_FEE;
+    }
+
+    public Map<Integer, BlockSummary> getRecentBlockSummaryMap() throws ServerException {
+        return getBlockSummaryMap(null, null);
+    }
+
+    public Map<Integer, BlockSummary> getBlockSummaryMap(Integer height, BlockHeader blockHeader) throws ServerException {
+        if(serverCapability.supportsBlockStats()) {
+            if(height == null) {
+                Integer current = AppServices.getCurrentBlockHeight();
+                if(current == null) {
+                    return Collections.emptyMap();
+                }
+                Set<Integer> heights = IntStream.range(current - 1, current + 1).boxed().collect(Collectors.toSet());
+                Map<Integer, BlockStats> blockStats = electrumServerRpc.getBlockStats(getTransport(), heights);
+                return blockStats.keySet().stream().collect(Collectors.toMap(java.util.function.Function.identity(), v -> blockStats.get(v).toBlockSummary()));
+            } else {
+                Map<Integer, BlockStats> blockStats = electrumServerRpc.getBlockStats(getTransport(), Set.of(height));
+                return blockStats.keySet().stream().collect(Collectors.toMap(java.util.function.Function.identity(), v -> blockStats.get(v).toBlockSummary()));
+            }
+        }
+
+        FeeRatesSource feeRatesSource = Config.get().getFeeRatesSource();
+        feeRatesSource = (feeRatesSource == null ? FeeRatesSource.MEMPOOL_SPACE : feeRatesSource);
+
+        if(feeRatesSource.supportsNetwork(Network.get())) {
+            try {
+                if(blockHeader == null) {
+                    return feeRatesSource.getRecentBlockSummaries();
+                } else {
+                    Map<Integer, BlockSummary> blockSummaryMap = new HashMap<>();
+                    BlockSummary blockSummary = feeRatesSource.getBlockSummary(Sha256Hash.twiceOf(blockHeader.bitcoinSerialize()));
+                    if(blockSummary != null && blockSummary.getHeight() != null) {
+                        blockSummaryMap.put(blockSummary.getHeight(), blockSummary);
+                    }
+                    return blockSummaryMap;
+                }
+            } catch(Exception e) {
+                return getServerBlockSummaryMap(height, blockHeader);
+            }
+        } else {
+            return getServerBlockSummaryMap(height, blockHeader);
+        }
+    }
+
+    private Map<Integer, BlockSummary> getServerBlockSummaryMap(Integer height, BlockHeader blockHeader) throws ServerException {
+        if(blockHeader == null || height == null) {
+            Integer current = AppServices.getCurrentBlockHeight();
+            if(current == null) {
+                return Collections.emptyMap();
+            }
+            Set<BlockTransactionHash> references = IntStream.range(current - 1, current + 1)
+                    .mapToObj(i -> new BlockTransaction(null, i, null, null, null)).collect(Collectors.toSet());
+            Map<Integer, BlockHeader> blockHeaders = getBlockHeaders(null, references);
+            return blockHeaders.keySet().stream()
+                    .collect(Collectors.toMap(java.util.function.Function.identity(), v -> new BlockSummary(v, blockHeaders.get(v).getTimeAsDate())));
+        } else {
+            Map<Integer, BlockSummary> blockSummaryMap = new HashMap<>();
+            blockSummaryMap.put(height, new BlockSummary(height, blockHeader.getTimeAsDate()));
+            return blockSummaryMap;
+        }
+    }
+
+    public List<BlockTransaction> getRecentMempoolTransactions() {
+        FeeRatesSource feeRatesSource = Config.get().getFeeRatesSource();
+        feeRatesSource = (feeRatesSource == null ? FeeRatesSource.MEMPOOL_SPACE : feeRatesSource);
+
+        if(feeRatesSource.supportsNetwork(Network.get())) {
+            try {
+                List<BlockTransactionHash> recentTransactions = feeRatesSource.getRecentMempoolTransactions();
+                Map<BlockTransactionHash, Transaction> setReferences = new HashMap<>();
+                setReferences.put(recentTransactions.getFirst(), null);
+                if(recentTransactions.size() > 1) {
+                    Random random = new Random();
+                    int halfSize = recentTransactions.size() / 2;
+                    setReferences.put(recentTransactions.get(halfSize == 1 ? 1 : random.nextInt(halfSize) + 1), null);
+                }
+                Map<Sha256Hash, BlockTransaction> transactions = getTransactions(null, setReferences, Collections.emptyMap());
+                return transactions.values().stream().filter(blxTx -> blxTx.getTransaction() != null).toList();
+            } catch(Exception e) {
+                return Collections.emptyList();
+            }
+        } else {
+            return Collections.emptyList();
+        }
+    }
+
+    public Sha256Hash broadcastTransaction(Transaction transaction, Long fee) throws ServerException {
+        Sha256Hash txid = broadcastTransactionPrivately(transaction);
+        if(txid != null) {
+            BlockTransaction blkTx = new BlockTransaction(txid, 0, null, fee, transaction);
+            broadcastedTransactions.put(txid, blkTx);
+        }
+
+        return txid;
     }
 
     public Sha256Hash broadcastTransactionPrivately(Transaction transaction) throws ServerException {
@@ -985,6 +1203,14 @@ public class ElectrumServer {
         return scriptHashes;
     }
 
+    private static TransactionOutput getPrevOutput(Wallet wallet, TransactionInput txInput) {
+        try {
+            return wallet.getWalletTransaction(txInput.getOutpoint().getHash()).getTransaction().getOutputs().get((int)txInput.getOutpoint().getIndex());
+        } catch(Exception e) {
+            return null;
+        }
+    }
+
     public static String getScriptHash(WalletNode node) {
         byte[] hash = Sha256Hash.hash(node.getOutputScript().getProgram());
         byte[] reversed = Utils.reverseBytes(hash);
@@ -1021,15 +1247,19 @@ public class ElectrumServer {
         existingStatuses.add(status);
     }
 
-    public static boolean supportsBatching(List<String> serverVersion) {
-        if(serverVersion.size() > 0) {
-            String server = serverVersion.get(0).toLowerCase(Locale.ROOT);
+    public static void updateRetrievedBlockHeaders(Integer blockHeight, BlockHeader blockHeader) {
+        retrievedBlockHeaders.put(blockHeight, blockHeader);
+    }
+
+    public static ServerCapability getServerCapability(List<String> serverVersion) {
+        if(!serverVersion.isEmpty()) {
+            String server = serverVersion.getFirst().toLowerCase(Locale.ROOT);
             if(server.contains("electrumx")) {
-                return true;
+                return new ServerCapability(true, true);
             }
 
             if(server.startsWith("cormorant")) {
-                return true;
+                return new ServerCapability(true, false, true, false);
             }
 
             if(server.startsWith("electrs/")) {
@@ -1041,7 +1271,7 @@ public class ElectrumServer {
                 try {
                     Version version = new Version(electrsVersion);
                     if(version.compareTo(ELECTRS_MIN_BATCHING_VERSION) >= 0) {
-                        return true;
+                        return new ServerCapability(true, true);
                     }
                 } catch(Exception e) {
                     //ignore
@@ -1057,15 +1287,38 @@ public class ElectrumServer {
                 try {
                     Version version = new Version(fulcrumVersion);
                     if(version.compareTo(FULCRUM_MIN_BATCHING_VERSION) >= 0) {
-                        return true;
+                        return new ServerCapability(true, true);
                     }
                 } catch(Exception e) {
                     //ignore
                 }
             }
+
+            if(server.startsWith("mempool-electrs")) {
+                String mempoolElectrsVersion = server.substring("mempool-electrs".length()).trim();
+                int dashIndex = mempoolElectrsVersion.indexOf('-');
+                String mempoolElectrsSuffix = "";
+                if(dashIndex > -1) {
+                    mempoolElectrsSuffix = mempoolElectrsVersion.substring(dashIndex);
+                    mempoolElectrsVersion = mempoolElectrsVersion.substring(0, dashIndex);
+                }
+                try {
+                    Version version = new Version(mempoolElectrsVersion);
+                    if(version.compareTo(MEMPOOL_ELECTRS_MIN_BATCHING_VERSION) > 0 ||
+                            (version.compareTo(MEMPOOL_ELECTRS_MIN_BATCHING_VERSION) == 0 && (!mempoolElectrsSuffix.contains("dev") || mempoolElectrsSuffix.contains("dev-249848d")))) {
+                        return new ServerCapability(true, 25, false);
+                    }
+                } catch(Exception e) {
+                    //ignore
+                }
+            }
+
+            if(server.startsWith("electrumpersonalserver")) {
+                return new ServerCapability(false, false);
+            }
         }
 
-        return false;
+        return new ServerCapability(false, true);
     }
 
     public static class ServerVersionService extends Service<List<String>> {
@@ -1157,7 +1410,7 @@ public class ElectrumServer {
                                         if(bwtStartException != null) {
                                             Matcher walletLoadingMatcher = RPC_WALLET_LOADING_PATTERN.matcher(bwtStartException.getMessage());
                                             if(bwtStartException.getMessage().contains("Wallet file not specified")) {
-                                                throw new ServerException("Bitcoin Core requires Multi-Wallet to be enabled in the Server Preferences");
+                                                throw new ServerException("Bitcoin Core requires Multi-Wallet to be enabled in the Server Settings");
                                             } else if(bwtStartException.getMessage().contains("Upgrade Bitcoin Core to v24 or later for Taproot wallet support")) {
                                                 throw new ServerException(bwtStartException.getMessage());
                                             } else if(bwtStartException.getMessage().contains("Wallet file verification failed. Refusing to load database.")) {
@@ -1196,9 +1449,10 @@ public class ElectrumServer {
                         firstCall = false;
 
                         //If electrumx is detected, we can upgrade to batched RPC. Electrs/EPS do not support batching.
-                        if(supportsBatching(serverVersion)) {
+                        serverCapability = getServerCapability(serverVersion);
+                        if(serverCapability.supportsBatching()) {
                             log.debug("Upgrading to batched JSON-RPC");
-                            electrumServerRpc = new BatchedElectrumServerRpc(electrumServerRpc.getIdCounterValue());
+                            electrumServerRpc = new BatchedElectrumServerRpc(electrumServerRpc.getIdCounterValue(), serverCapability.getMaxTargetBlocks());
                         }
 
                         BlockHeaderTip tip;
@@ -1229,8 +1483,9 @@ public class ElectrumServer {
                             if(elapsed > FEE_RATES_PERIOD) {
                                 Map<Integer, Double> blockTargetFeeRates = electrumServer.getFeeEstimates(AppServices.TARGET_BLOCKS_RANGE, false);
                                 Set<MempoolRateSize> mempoolRateSizes = electrumServer.getMempoolRateSizes();
+                                Double nextBlockMedianFeeRate = electrumServer.getNextBlockMedianFeeRate();
                                 feeRatesRetrievedAt = System.currentTimeMillis();
-                                return new FeeRatesUpdatedEvent(blockTargetFeeRates, mempoolRateSizes);
+                                return new FeeRatesUpdatedEvent(blockTargetFeeRates, mempoolRateSizes, nextBlockMedianFeeRate);
                             }
                         } else {
                             closeConnection();
@@ -1355,6 +1610,31 @@ public class ElectrumServer {
             ElectrumServer electrumServer = new ElectrumServer();
             Set<MempoolRateSize> mempoolRateSizes = electrumServer.getMempoolRateSizes();
             EventManager.get().post(new MempoolRateSizesUpdatedEvent(mempoolRateSizes));
+        }
+
+        @Subscribe
+        public void walletNodeHistoryChanged(WalletNodeHistoryChangedEvent event) {
+            String status = broadcastRecent.remove(event.getScriptHash());
+            if(status != null && status.equals(event.getStatus())) {
+                Map<String, String> subscribeScriptHashes = new HashMap<>();
+                Random random = new Random();
+                int subscriptions = random.nextInt(2) + 1;
+                for(int i = 0; i < subscriptions; i++) {
+                    byte[] randomScriptHashBytes = new byte[32];
+                    random.nextBytes(randomScriptHashBytes);
+                    String randomScriptHash = Utils.bytesToHex(randomScriptHashBytes);
+                    if(!subscribedScriptHashes.containsKey(randomScriptHash)) {
+                        subscribeScriptHashes.put("m/" + subscribeScriptHashes.size(), randomScriptHash);
+                    }
+                }
+
+                try {
+                    electrumServerRpc.subscribeScriptHashes(transport, null, subscribeScriptHashes);
+                    subscribeScriptHashes.values().forEach(scriptHash -> subscribedRecent.put(scriptHash, AppServices.getCurrentBlockHeight()));
+                } catch(ElectrumServerRpcException e) {
+                    log.debug("Error subscribing to recent mempool transaction outputs", e);
+                }
+            }
         }
     }
 
@@ -1487,6 +1767,7 @@ public class ElectrumServer {
         private final Sha256Hash txId;
         private final Set<WalletNode> nodes;
         private final IntegerProperty iterationCount = new SimpleIntegerProperty(0);
+        private boolean cancelled;
 
         public TransactionMempoolService(Wallet wallet, Sha256Hash txId, Set<WalletNode> nodes) {
             this.wallet = wallet;
@@ -1500,6 +1781,22 @@ public class ElectrumServer {
 
         public IntegerProperty iterationCountProperty() {
             return iterationCount;
+        }
+
+        public boolean isCancelled() {
+            return cancelled;
+        }
+
+        @Override
+        public void start() {
+            this.cancelled = false;
+            super.start();
+        }
+
+        @Override
+        public boolean cancel() {
+            this.cancelled = true;
+            return super.cancel();
         }
 
         @Override
@@ -1547,7 +1844,7 @@ public class ElectrumServer {
                 protected Map<Sha256Hash, BlockTransaction> call() throws ServerException {
                     Map<Sha256Hash, BlockTransaction> transactionMap = new HashMap<>();
                     for(Sha256Hash ref : references) {
-                        if(retrievedTransactions.get(ref) != null) {
+                        if(retrievedTransactions.containsKey(ref)) {
                             transactionMap.put(ref, retrievedTransactions.get(ref));
                         }
                     }
@@ -1607,15 +1904,17 @@ public class ElectrumServer {
                     ElectrumServer electrumServer = new ElectrumServer();
                     List<Set<BlockTransactionHash>> outputTransactionReferences = electrumServer.getOutputTransactionReferences(transaction, indexStart, indexEnd, blockTransactionHashes);
 
-                    Set<BlockTransactionHash> setReferences = new HashSet<>();
+                    Map<BlockTransactionHash, Transaction> setReferences = new HashMap<>();
                     for(Set<BlockTransactionHash> outputReferences : outputTransactionReferences) {
                         if(outputReferences != null) {
-                            setReferences.addAll(outputReferences);
+                            for(BlockTransactionHash outputReference : outputReferences) {
+                                setReferences.put(outputReference, null);
+                            }
                         }
                     }
                     setReferences.remove(null);
                     setReferences.remove(UNFETCHABLE_BLOCK_TRANSACTION);
-                    setReferences.removeIf(ref -> transactionMap.get(ref.getHash()) != null);
+                    setReferences.keySet().removeIf(ref -> transactionMap.get(ref.getHash()) != null);
 
                     List<BlockTransaction> blockTransactions = new ArrayList<>(transaction.getOutputs().size());
                     for(int i = 0; i < transaction.getOutputs().size(); i++) {
@@ -1623,7 +1922,7 @@ public class ElectrumServer {
                     }
 
                     if(!setReferences.isEmpty()) {
-                        Map<Integer, BlockHeader> blockHeaderMap = electrumServer.getBlockHeaders(null, setReferences);
+                        Map<Integer, BlockHeader> blockHeaderMap = electrumServer.getBlockHeaders(null, setReferences.keySet());
                         transactionMap.putAll(electrumServer.getTransactions(null, setReferences, blockHeaderMap));
                     }
 
@@ -1664,9 +1963,11 @@ public class ElectrumServer {
 
     public static class BroadcastTransactionService extends Service<Sha256Hash> {
         private final Transaction transaction;
+        private final Long fee;
 
-        public BroadcastTransactionService(Transaction transaction) {
+        public BroadcastTransactionService(Transaction transaction, Long fee) {
             this.transaction = transaction;
+            this.fee = fee;
         }
 
         @Override
@@ -1674,7 +1975,7 @@ public class ElectrumServer {
             return new Task<>() {
                 protected Sha256Hash call() throws ServerException {
                     ElectrumServer electrumServer = new ElectrumServer();
-                    return electrumServer.broadcastTransactionPrivately(transaction);
+                    return electrumServer.broadcastTransaction(transaction, fee);
                 }
             };
         }
@@ -1687,9 +1988,147 @@ public class ElectrumServer {
                 protected FeeRatesUpdatedEvent call() throws ServerException {
                     ElectrumServer electrumServer = new ElectrumServer();
                     Map<Integer, Double> blockTargetFeeRates = electrumServer.getFeeEstimates(AppServices.TARGET_BLOCKS_RANGE, false);
-                    return new FeeRatesUpdatedEvent(blockTargetFeeRates, null);
+                    Double nextBlockMedianFeeRate = electrumServer.getNextBlockMedianFeeRate();
+                    return new FeeRatesUpdatedEvent(blockTargetFeeRates, null, nextBlockMedianFeeRate);
                 }
             };
+        }
+    }
+
+    public static class BlockSummaryService extends Service<BlockSummaryEvent> {
+        private final List<NewBlockEvent> newBlockEvents;
+
+        public BlockSummaryService(List<NewBlockEvent> newBlockEvents) {
+            this.newBlockEvents = newBlockEvents;
+        }
+
+        @Override
+        protected Task<BlockSummaryEvent> createTask() {
+            return new Task<>() {
+                protected BlockSummaryEvent call() throws ServerException {
+                    ElectrumServer electrumServer = new ElectrumServer();
+                    Map<Integer, BlockSummary> blockSummaryMap = new LinkedHashMap<>();
+
+                    int maxHeight = AppServices.getBlockSummaries().keySet().stream().mapToInt(Integer::intValue).max().orElse(0);
+                    int startHeight = newBlockEvents.stream().mapToInt(NewBlockEvent::getHeight).min().orElse(0);
+                    int endHeight = newBlockEvents.stream().mapToInt(NewBlockEvent::getHeight).max().orElse(0);
+                    int totalBlocks = Math.max(0, endHeight - maxHeight);
+
+                    if(startHeight == 0 || totalBlocks > 1 || startHeight > maxHeight + 1) {
+                        if(isBlockstorm(totalBlocks)) {
+                            int start = Math.max(maxHeight + 1, endHeight - 15);
+                            for(int height = start; height <= endHeight; height++) {
+                                blockSummaryMap.put(height, new BlockSummary(height, new Date(), 1.0d, 0, 0));
+                            }
+                        } else {
+                            blockSummaryMap.putAll(electrumServer.getRecentBlockSummaryMap());
+                        }
+                    }
+
+                    List<NewBlockEvent> events = new ArrayList<>(newBlockEvents);
+                    events.removeIf(event -> blockSummaryMap.containsKey(event.getHeight()));
+                    if(!events.isEmpty()) {
+                        for(NewBlockEvent event : newBlockEvents) {
+                            blockSummaryMap.putAll(electrumServer.getBlockSummaryMap(event.getHeight(), event.getBlockHeader()));
+                        }
+                    }
+
+                    Config config = Config.get();
+                    if(!isBlockstorm(totalBlocks) && !AppServices.isUsingProxy() && config.getServer().getProtocol().equals(Protocol.SSL)
+                            && (config.getServerType() == ServerType.PUBLIC_ELECTRUM_SERVER || config.getServerType() == ServerType.ELECTRUM_SERVER)) {
+                        subscribeRecent(electrumServer, AppServices.getCurrentBlockHeight() == null ? endHeight : AppServices.getCurrentBlockHeight());
+                    }
+
+                    Double nextBlockMedianFeeRate = null;
+                    if(!isBlockstorm(totalBlocks)) {
+                        nextBlockMedianFeeRate = electrumServer.getNextBlockMedianFeeRate();
+                    }
+                    return new BlockSummaryEvent(blockSummaryMap, nextBlockMedianFeeRate);
+                }
+            };
+        }
+
+        private boolean isBlockstorm(int totalBlocks) {
+            return Network.get() != Network.MAINNET && totalBlocks > 2;
+        }
+
+        private void subscribeRecent(ElectrumServer electrumServer, int currentHeight) {
+            Set<String> unsubscribeScriptHashes = subscribedRecent.entrySet().stream().filter(entry -> entry.getValue() == null || entry.getValue() <= currentHeight - 3)
+                    .map(Map.Entry::getKey).collect(Collectors.toSet());
+            unsubscribeScriptHashes.removeIf(subscribedScriptHashes::containsKey);
+            if(!unsubscribeScriptHashes.isEmpty() && serverCapability.supportsUnsubscribe()) {
+                electrumServerRpc.unsubscribeScriptHashes(transport, unsubscribeScriptHashes);
+            }
+            subscribedRecent.keySet().removeAll(unsubscribeScriptHashes);
+            broadcastRecent.keySet().removeAll(unsubscribeScriptHashes);
+
+            Map<String, String> subscribeScriptHashes = new HashMap<>();
+            List<BlockTransaction> recentTransactions = electrumServer.getRecentMempoolTransactions();
+            for(BlockTransaction blkTx : recentTransactions) {
+                for(int i = 0; i < blkTx.getTransaction().getOutputs().size(); i++) {
+                    TransactionOutput txOutput = blkTx.getTransaction().getOutputs().get(i);
+                    String scriptHash = getScriptHash(txOutput);
+                    if(!subscribedScriptHashes.containsKey(scriptHash)) {
+                        subscribeScriptHashes.put("m/" + subscribeScriptHashes.size(), scriptHash);
+                    }
+                    if(Math.random() < 0.1d) {
+                        break;
+                    }
+                }
+            }
+
+            if(!subscribeScriptHashes.isEmpty()) {
+                Random random = new Random();
+                int additionalRandomScriptHashes = random.nextInt(8);
+                for(int i = 0; i < additionalRandomScriptHashes; i++) {
+                    byte[] randomScriptHashBytes = new byte[32];
+                    random.nextBytes(randomScriptHashBytes);
+                    String randomScriptHash = Utils.bytesToHex(randomScriptHashBytes);
+                    if(!subscribedScriptHashes.containsKey(randomScriptHash)) {
+                        subscribeScriptHashes.put("m/" + subscribeScriptHashes.size(), randomScriptHash);
+                    }
+                }
+
+                try {
+                    electrumServerRpc.subscribeScriptHashes(transport, null, subscribeScriptHashes);
+                    subscribeScriptHashes.values().forEach(scriptHash -> subscribedRecent.put(scriptHash, currentHeight));
+                } catch(ElectrumServerRpcException e) {
+                    log.debug("Error subscribing to recent mempool transactions", e);
+                }
+            }
+
+            if(!recentTransactions.isEmpty()) {
+                broadcastRecent(electrumServer, recentTransactions);
+            }
+        }
+
+        private void broadcastRecent(ElectrumServer electrumServer, List<BlockTransaction> recentTransactions) {
+            ScheduledService<Void> broadcastService = new ScheduledService<>() {
+                @Override
+                protected Task<Void> createTask() {
+                    return new Task<>() {
+                        @Override
+                        protected Void call() throws Exception {
+                            if(!recentTransactions.isEmpty()) {
+                                Random random = new Random();
+                                if(random.nextBoolean()) {
+                                    BlockTransaction blkTx = recentTransactions.get(random.nextInt(recentTransactions.size()));
+                                    String scriptHash = getScriptHash(blkTx.getTransaction().getOutputs().getFirst());
+                                    String status = getScriptHashStatus(List.of(new ScriptHashTx(0, blkTx.getHashAsString(), blkTx.getFee())));
+                                    broadcastRecent.put(scriptHash, status);
+                                    electrumServer.broadcastTransaction(blkTx.getTransaction());
+                                }
+                            }
+                            return null;
+                        }
+                    };
+                }
+            };
+            broadcastService.setDelay(Duration.seconds(Math.random() * 60 * 10));
+            broadcastService.setPeriod(Duration.hours(1));
+            broadcastService.setOnSucceeded(_ -> broadcastService.cancel());
+            broadcastService.setOnFailed(_ -> broadcastService.cancel());
+            broadcastService.start();
         }
     }
 

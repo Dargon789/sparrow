@@ -9,6 +9,7 @@ import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.psbt.PSBTInput;
 import com.sparrowwallet.drongo.uri.BitcoinURI;
 import com.sparrowwallet.drongo.wallet.*;
+import com.sparrowwallet.hummingbird.UR;
 import com.sparrowwallet.hummingbird.registry.CryptoPSBT;
 import com.sparrowwallet.sparrow.AppServices;
 import com.sparrowwallet.sparrow.EventManager;
@@ -226,6 +227,9 @@ public class HeadersController extends TransactionFormController implements Init
 
     @FXML
     private Button broadcastButton;
+
+    @FXML
+    private Button showTransactionButton;
 
     @FXML
     private Button saveFinalButton;
@@ -461,6 +465,8 @@ public class HeadersController extends TransactionFormController implements Init
         broadcastProgressBar.visibleProperty().bind(signaturesProgressBar.visibleProperty().not());
 
         broadcastButton.managedProperty().bind(broadcastButton.visibleProperty());
+        showTransactionButton.managedProperty().bind(showTransactionButton.visibleProperty());
+        showTransactionButton.visibleProperty().bind(broadcastButton.visibleProperty().not());
         saveFinalButton.managedProperty().bind(saveFinalButton.visibleProperty());
         saveFinalButton.visibleProperty().bind(broadcastButton.visibleProperty().not());
         broadcastButton.visibleProperty().bind(AppServices.onlineProperty());
@@ -1152,7 +1158,7 @@ public class HeadersController extends TransactionFormController implements Init
             historyService.start();
         }
 
-        ElectrumServer.BroadcastTransactionService broadcastTransactionService = new ElectrumServer.BroadcastTransactionService(headersForm.getTransaction());
+        ElectrumServer.BroadcastTransactionService broadcastTransactionService = new ElectrumServer.BroadcastTransactionService(headersForm.getTransaction(), fee.getValue());
         broadcastTransactionService.setOnSucceeded(workerStateEvent -> {
             //Although we wait for WalletNodeHistoryChangedEvent to indicate tx is in mempool, start a scheduled service to check the script hashes should notifications fail
             if(headersForm.getSigningWallet() != null) {
@@ -1170,7 +1176,7 @@ public class HeadersController extends TransactionFormController implements Init
                         Platform.runLater(() -> EventManager.get().post(new WalletNodeHistoryChangedEvent(scriptHashes.iterator().next())));
                     }
 
-                    if(transactionMempoolService.getIterationCount() > 3) {
+                    if(transactionMempoolService.getIterationCount() > 3 && !transactionMempoolService.isCancelled()) {
                         transactionMempoolService.cancel();
                         broadcastProgressBar.setProgress(0);
                         log.error("Timeout searching for broadcasted transaction");
@@ -1179,11 +1185,13 @@ public class HeadersController extends TransactionFormController implements Init
                     }
                 });
                 transactionMempoolService.setOnFailed(mempoolWorkerStateEvent -> {
-                    transactionMempoolService.cancel();
-                    broadcastProgressBar.setProgress(0);
-                    log.error("Timeout searching for broadcasted transaction");
-                    AppServices.showErrorDialog("Timeout searching for broadcasted transaction", "The transaction was broadcast but the server did not indicate it had entered the mempool. It is safe to try broadcasting again.");
-                    broadcastButton.setDisable(false);
+                    if(!transactionMempoolService.isCancelled()) {
+                        transactionMempoolService.cancel();
+                        broadcastProgressBar.setProgress(0);
+                        log.error("Timeout searching for broadcasted transaction");
+                        AppServices.showErrorDialog("Timeout searching for broadcasted transaction", "The transaction was broadcast but the server did not indicate it had entered the mempool. It is safe to try broadcasting again.");
+                        broadcastButton.setDisable(false);
+                    }
                 });
                 transactionMempoolService.start();
             } else {
@@ -1255,6 +1263,21 @@ public class HeadersController extends TransactionFormController implements Init
         broadcastTransactionService.start();
     }
 
+    public void showTransaction(ActionEvent event) {
+        try {
+            Transaction transaction = headersForm.getPsbt().extractTransaction();
+            byte[] txBytes = transaction.bitcoinSerialize();
+            UR ur = UR.fromBytes(txBytes);
+            BBQR bbqr = new BBQR(BBQRType.TXN, txBytes);
+            QRDisplayDialog qrDisplayDialog = new QRDisplayDialog(ur, bbqr, false, false, false);
+            qrDisplayDialog.initOwner(showTransactionButton.getScene().getWindow());
+            qrDisplayDialog.showAndWait();
+        } catch (Exception exception) {
+            log.error("Error creating UR", exception);
+            AppServices.showErrorDialog("Error displaying transaction QR code", exception.getMessage());
+        }
+    }
+
     public void saveFinalTransaction(ActionEvent event) {
         Stage window = new Stage();
 
@@ -1308,6 +1331,14 @@ public class HeadersController extends TransactionFormController implements Init
 
         if(blockTransaction != null && AppServices.getCurrentBlockHeight() != null) {
             updateBlockchainForm(blockTransaction, AppServices.getCurrentBlockHeight());
+        }
+    }
+
+    @Override
+    public void close() {
+        super.close();
+        if(transactionMempoolService != null) {
+            transactionMempoolService.cancel();
         }
     }
 
@@ -1528,6 +1559,23 @@ public class HeadersController extends TransactionFormController implements Init
 
             signButtonBox.setVisible(false);
             broadcastButtonBox.setVisible(true);
+
+            if(Config.get().hasServer() && !AppServices.isConnected() && !AppServices.isConnecting()) {
+                if(Config.get().getConnectToBroadcast() == null) {
+                    Platform.runLater(() -> {
+                        ConfirmationAlert confirmationAlert = new ConfirmationAlert("Connect to broadcast?", "Connect to the configured server to broadcast the transaction?", ButtonType.NO, ButtonType.YES);
+                        Optional<ButtonType> optType = confirmationAlert.showAndWait();
+                        if(confirmationAlert.isDontAskAgain() && optType.isPresent()) {
+                            Config.get().setConnectToBroadcast(optType.get() == ButtonType.YES);
+                        }
+                        if(optType.isPresent() && optType.get() == ButtonType.YES) {
+                            EventManager.get().post(new RequestConnectEvent());
+                        }
+                    });
+                } else if(Config.get().getConnectToBroadcast()) {
+                    Platform.runLater(() -> EventManager.get().post(new RequestConnectEvent()));
+                }
+            }
         }
     }
 
@@ -1556,24 +1604,18 @@ public class HeadersController extends TransactionFormController implements Init
             if(transactionMempoolService != null) {
                 transactionMempoolService.cancel();
             }
+        }
+    }
 
+    @Subscribe
+    public void walletHistoryFinished(WalletHistoryFinishedEvent event) {
+        if(headersForm.getSigningWallet() != null && headersForm.getSigningWallet().equals(event.getWallet()) && headersForm.isTransactionFinalized()) {
             Sha256Hash txid = headersForm.getTransaction().getTxId();
-            ElectrumServer.TransactionReferenceService transactionReferenceService = new ElectrumServer.TransactionReferenceService(Set.of(txid), event.getScriptHash());
-            transactionReferenceService.setOnSucceeded(successEvent -> {
-                Map<Sha256Hash, BlockTransaction> transactionMap = transactionReferenceService.getValue();
-                BlockTransaction blockTransaction = transactionMap.get(txid);
-                if(blockTransaction != null) {
-                    headersForm.setBlockTransaction(blockTransaction);
-                    updateBlockchainForm(blockTransaction, AppServices.getCurrentBlockHeight());
-                }
-                EventManager.get().post(new TransactionReferencesFinishedEvent(headersForm.getTransaction(), blockTransaction));
-            });
-            transactionReferenceService.setOnFailed(failEvent -> {
-                log.error("Could not update block transaction", failEvent.getSource().getException());
-                EventManager.get().post(new TransactionReferencesFailedEvent(headersForm.getTransaction(), failEvent.getSource().getException()));
-            });
-            EventManager.get().post(new TransactionReferencesStartedEvent(headersForm.getTransaction()));
-            transactionReferenceService.start();
+            BlockTransaction blockTransaction = event.getWallet().getWalletTransaction(txid);
+            if(blockTransaction != null && !blockTransaction.equals(headersForm.getBlockTransaction())) {
+                headersForm.setBlockTransaction(blockTransaction);
+                updateBlockchainForm(blockTransaction, AppServices.getCurrentBlockHeight());
+            }
         }
     }
 
@@ -1599,7 +1641,7 @@ public class HeadersController extends TransactionFormController implements Init
                         name += matcher.group(2);
                     }
                 }
-                blockTransaction.setLabel(name != null && name.length() > 255 ? name.substring(0, 255) : name);
+                blockTransaction.setLabel(name != null && name.length() > BlockTransaction.MAX_LABEL_LENGTH ? name.substring(0, BlockTransaction.MAX_LABEL_LENGTH) : name);
                 changedLabelEntries.add(new TransactionEntry(event.getWallet(), blockTransaction, Collections.emptyMap(), Collections.emptyMap()));
             }
 
@@ -1644,6 +1686,19 @@ public class HeadersController extends TransactionFormController implements Init
         if(event.getPsbt().equals(headersForm.getPsbt())) {
             updateTxId();
             headersForm.setWalletTransaction(getWalletTransaction(headersForm.getInputTransactions()));
+        }
+    }
+
+    @Subscribe
+    public void connection(ConnectionEvent event) {
+        broadcastProgressBar.setDisable(false);
+    }
+
+    @Subscribe
+    public void disconnection(DisconnectionEvent event) {
+        broadcastProgressBar.setDisable(true);
+        if(broadcastProgressBar.getProgress() < 0) {
+            broadcastProgressBar.setProgress(0);
         }
     }
 

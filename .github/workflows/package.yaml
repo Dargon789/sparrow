@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-2022, ubuntu-20.04, macos-13]
+        os: [windows-2022, ubuntu-22.04, ubuntu-22.04-arm, macos-13, macos-14]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,10 +30,13 @@ jobs:
       - name: Package tar distribution
         if: ${{ runner.os == 'Linux' }}
         run: ./gradlew packageTarDistribution
-      - name: Upload Artifacts
+      - name: Repackage deb distribution
+        if: ${{ runner.os == 'Linux' }}
+        run: ./repackage.sh
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Sparrow Build - ${{ runner.os }}
+          name: Sparrow Build - ${{ runner.os }} ${{ runner.arch }}
           path: |
             build/jpackage/*
             !build/jpackage/Sparrow/
@@ -43,14 +46,14 @@ jobs:
       - name: Package headless tar distribution
         if: ${{ runner.os == 'Linux' }}
         run: ./gradlew -Djava.awt.headless=true packageTarDistribution
-      - name: Rename Headless Artifacts
+      - name: Repackage headless deb distribution
         if: ${{ runner.os == 'Linux' }}
-        run: for f in build/jpackage/sparrow*; do mv -v "$f" "${f/sparrow/sparrow-server}"; done;
+        run: ./repackage.sh
       - name: Upload Headless Artifact
         if: ${{ runner.os == 'Linux' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Sparrow Build - ${{ runner.os }} Headless
+          name: Sparrow Build - ${{ runner.os }} ${{ runner.arch }} Headless
           path: |
             build/jpackage/*
             !build/jpackage/Sparrow/
