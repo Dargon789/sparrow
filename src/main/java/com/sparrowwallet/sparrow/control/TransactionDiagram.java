@@ -4,8 +4,12 @@ import com.sparrowwallet.drongo.KeyPurpose;
 import com.sparrowwallet.drongo.OsType;
 import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.bip47.PaymentCode;
+import com.sparrowwallet.drongo.dns.DnsPayment;
+import com.sparrowwallet.drongo.dns.DnsPaymentCache;
 import com.sparrowwallet.drongo.protocol.Sha256Hash;
 import com.sparrowwallet.drongo.protocol.TransactionOutput;
+import com.sparrowwallet.drongo.silentpayments.SilentPayment;
+import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
 import com.sparrowwallet.drongo.uri.BitcoinURI;
 import com.sparrowwallet.drongo.wallet.*;
 import com.sparrowwallet.sparrow.*;
@@ -22,6 +26,7 @@ import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.embed.swing.SwingFXUtils;
 import javafx.event.EventHandler;
+import javafx.geometry.HPos;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Group;
@@ -103,6 +108,7 @@ public class TransactionDiagram extends GridPane {
                 expandedDiagram.setId("transactionDiagram");
                 expandedDiagram.setExpanded(true);
                 expandedDiagram.setFinal(isFinal());
+                expandedDiagram.setMaxWidth(AppServices.getActiveWindow().getWidth() - 200);
                 updateDerivedDiagram(expandedDiagram);
 
                 HBox buttonBox = new HBox();
@@ -120,7 +126,7 @@ public class TransactionDiagram extends GridPane {
                 AppServices.setStageIcon(stage);
                 stage.setScene(scene);
                 stage.setOnShowing(e -> {
-                    AppServices.moveToActiveWindowScreen(stage, 600, 460);
+                    AppServices.moveToActiveWindowScreen(stage, expandedDiagram.getMaxWidth(), 460);
                 });
                 stage.setOnHidden(e -> {
                     expandedDiagram = null;
@@ -136,6 +142,39 @@ public class TransactionDiagram extends GridPane {
             contextMenu.show(getChildren().iterator().next(), event.getScreenX(), event.getScreenY());
         }
     };
+
+    public TransactionDiagram() {
+        ColumnConstraints col1 = new ColumnConstraints();
+        col1.setPrefWidth(22);
+        col1.setHgrow(Priority.NEVER);
+
+        ColumnConstraints col2 = new ColumnConstraints();
+        col2.setHgrow(Priority.ALWAYS);
+        col2.setPercentWidth(25);
+        col2.setFillWidth(true);
+
+        ColumnConstraints col3 = new ColumnConstraints();
+        col3.setPrefWidth(140);
+        col3.setHgrow(Priority.NEVER);
+
+        ColumnConstraints col4 = new ColumnConstraints();
+        Label label = new Label();
+        col4.setMinWidth(TextUtils.computeTextWidth(label.getFont(), "Transaction", 0) + 20);
+        col4.setHgrow(Priority.NEVER);
+        col4.setHalignment(HPos.CENTER);
+
+        ColumnConstraints col5 = new ColumnConstraints();
+        col5.setPrefWidth(140);
+        col5.setHgrow(Priority.NEVER);
+
+        ColumnConstraints col6 = new ColumnConstraints();
+        col6.setHgrow(Priority.ALWAYS);
+        col6.setPercentWidth(25);
+        col6.setFillWidth(true);
+
+        getColumnConstraints().addAll(col1, col2, col3, col4, col5, col6);
+        setPadding(new Insets(0, 0, 0, 40));
+    }
 
     public void update(WalletTransaction walletTx) {
         setMinHeight(getDiagramHeight());
@@ -165,7 +204,7 @@ public class TransactionDiagram extends GridPane {
 
         VBox messagePane = new VBox();
         messagePane.setPrefHeight(getDiagramHeight());
-        messagePane.setPadding(new Insets(0, 10, 0, 280));
+        messagePane.setPadding(new Insets(0, 10, 0, 10));
         messagePane.setAlignment(Pos.CENTER);
         messagePane.getChildren().add(createSpacer());
 
@@ -225,7 +264,6 @@ public class TransactionDiagram extends GridPane {
         GridPane.setConstraints(outputsPane, 5, 0);
 
         getChildren().clear();
-        getChildren().addAll(inputsTypePane, inputsPane, inputsLinesPane, txPane, outputsLinesPane, outputsPane);
 
         List<Payment> userPayments = getUserPayments();
         if(!isFinal() && userPayments.size() > 1) {
@@ -233,6 +271,8 @@ public class TransactionDiagram extends GridPane {
             GridPane.setConstraints(totalsPane, 2, 0, 3, 1);
             getChildren().add(totalsPane);
         }
+
+        getChildren().addAll(inputsTypePane, inputsPane, inputsLinesPane, txPane, outputsLinesPane, outputsPane);
 
         if(contextMenu == null) {
             contextMenu = new ContextMenu();
@@ -407,8 +447,6 @@ public class TransactionDiagram extends GridPane {
 
     private Pane getInputsLabels(List<Map<BlockTransactionHashIndex, WalletNode>> displayedUtxoSets) {
         VBox inputsBox = new VBox();
-        inputsBox.setMaxWidth(isExpanded() ? 300 : 150);
-        inputsBox.setPrefWidth(isExpanded() ? 230 : 150);
         inputsBox.setPadding(new Insets(0, 10, 0, 10));
         inputsBox.minHeightProperty().bind(minHeightProperty());
         inputsBox.setAlignment(Pos.BASELINE_RIGHT);
@@ -640,7 +678,8 @@ public class TransactionDiagram extends GridPane {
 
         double width = 140.0;
         long sum = walletTx.getTotal();
-        List<Long> values = walletTx.getTransaction().getOutputs().stream().filter(txo -> txo.getScript().getToAddress() != null).map(TransactionOutput::getValue).collect(Collectors.toList());
+        List<Long> values = walletTx.getOutputs().stream().filter(output -> !(output instanceof WalletTransaction.NonAddressOutput))
+                .map(output -> output.getTransactionOutput().getValue()).collect(Collectors.toList());
         values.add(walletTx.getFee());
         int numOutputs = displayedPayments.size() + walletTx.getChangeMap().size() + 1;
         for(int i = 1; i <= numOutputs; i++) {
@@ -676,8 +715,6 @@ public class TransactionDiagram extends GridPane {
 
     private Pane getOutputsLabels(List<Payment> displayedPayments) {
         VBox outputsBox = new VBox();
-        outputsBox.setMaxWidth(isExpanded() ? 350 : 150);
-        outputsBox.setPrefWidth(isExpanded() ? 230 : 150);
         outputsBox.setPadding(new Insets(0, 20, 0, 10));
         outputsBox.setAlignment(Pos.BASELINE_LEFT);
         outputsBox.getChildren().add(createSpacer());
@@ -686,15 +723,16 @@ public class TransactionDiagram extends GridPane {
         for(Payment payment : displayedPayments) {
             Glyph outputGlyph = GlyphUtils.getOutputGlyph(walletTx, payment);
             boolean labelledPayment = outputGlyph.getStyleClass().stream().anyMatch(style -> List.of("premix-icon", "badbank-icon", "whirlpoolfee-icon", "anchor-icon").contains(style)) || payment instanceof AdditionalPayment || payment.getLabel() != null;
-            Label recipientLabel = new Label(payment.getLabel() == null || payment.getType() == Payment.Type.FAKE_MIX || payment.getType() == Payment.Type.MIX ? payment.getAddress().toString().substring(0, 8) + "..." : payment.getLabel(), outputGlyph);
+            Label recipientLabel = new Label(payment.getLabel() == null || payment.getType() == Payment.Type.FAKE_MIX || payment.getType() == Payment.Type.MIX ? payment.toString().substring(0, 8) + "..." : payment.getLabel(), outputGlyph);
             recipientLabel.getStyleClass().add("output-label");
             recipientLabel.getStyleClass().add(labelledPayment ? "payment-label" : "recipient-label");
             Wallet toWallet = walletTx.getToWallet(AppServices.get().getOpenWallets().keySet(), payment);
-            WalletNode toNode = walletTx.getWallet() != null && !walletTx.getWallet().isBip47() ? walletTx.getAddressNodeMap().get(payment.getAddress()) : null;
+            WalletNode toNode = payment instanceof WalletNodePayment walletNodePayment ? walletNodePayment.getWalletNode() : null;
             Wallet toBip47Wallet = getBip47SendWallet(payment);
+            DnsPayment dnsPayment = DnsPaymentCache.getDnsPayment(payment);
             Tooltip recipientTooltip = new Tooltip((toWallet == null ? (toNode != null ? "Consolidate " : "Pay ") : "Receive ")
                     + getSatsValue(payment.getAmount()) + " sats to "
-                    + (payment instanceof AdditionalPayment ? (isExpanded() ? "\n" : "(click to expand)\n") + payment : (toWallet == null ? (payment.getLabel() == null ? (toNode != null ? toNode : (toBip47Wallet == null ? "external address" : toBip47Wallet.getDisplayName())) : payment.getLabel()) : toWallet.getFullDisplayName()) + "\n" + payment.getAddress().toString())
+                    + (payment instanceof AdditionalPayment ? (isExpanded() ? "\n" : "(click to expand)\n") + payment : (toWallet == null ? (dnsPayment == null ? (payment.getLabel() == null ? (toNode != null ? toNode : (toBip47Wallet == null ? "external address" : toBip47Wallet.getDisplayName())) : payment.getLabel()) : dnsPayment.toString()) : toWallet.getFullDisplayName()) + "\n" + payment.getDisplayAddress())
                     + (walletTx.isDuplicateAddress(payment) ? " (Duplicate)" : ""));
             recipientTooltip.getStyleClass().add("recipient-label");
             recipientTooltip.setShowDelay(new Duration(TOOLTIP_SHOW_DELAY));
@@ -719,9 +757,13 @@ public class TransactionDiagram extends GridPane {
                 paymentBox.getChildren().addAll(region, amountLabel);
             }
 
-            Wallet bip47Wallet = toWallet != null && toWallet.isBip47() ? toWallet : (toBip47Wallet != null && toBip47Wallet.isBip47() ? toBip47Wallet : null);
-            PaymentCode paymentCode = bip47Wallet == null ? null : bip47Wallet.getKeystores().getFirst().getExternalPaymentCode();
-            outputNodes.add(new OutputNode(paymentBox, payment.getAddress(), payment.getAmount(), paymentCode));
+            if(payment instanceof SilentPayment silentPayment) {
+                outputNodes.add(new OutputNode(paymentBox, silentPayment.isAddressComputed() ? silentPayment.getAddress() : null, payment.getAmount(), null, silentPayment.getSilentPaymentAddress()));
+            } else {
+                Wallet bip47Wallet = toWallet != null && toWallet.isBip47() ? toWallet : (toBip47Wallet != null && toBip47Wallet.isBip47() ? toBip47Wallet : null);
+                PaymentCode paymentCode = bip47Wallet == null ? null : bip47Wallet.getKeystores().getFirst().getExternalPaymentCode();
+                outputNodes.add(new OutputNode(paymentBox, payment.getAddress(), payment.getAmount(), paymentCode, null));
+            }
         }
 
         Set<Integer> seenIndexes = new HashSet<>();
@@ -785,7 +827,7 @@ public class TransactionDiagram extends GridPane {
             outputsBox.getChildren().add(outputNode.outputLabel);
             outputsBox.getChildren().add(createSpacer());
 
-            ContextMenu contextMenu = new LabelContextMenu(outputNode.address, outputNode.amount, outputNode.paymentCode);
+            ContextMenu contextMenu = new LabelContextMenu(outputNode.address, outputNode.amount, outputNode.paymentCode, outputNode.silentPaymentAddress);
             if(!outputNode.outputLabel.getChildren().isEmpty() && outputNode.outputLabel.getChildren().get(0) instanceof Label outputLabelControl) {
                 outputLabelControl.setContextMenu(contextMenu);
             }
@@ -960,8 +1002,11 @@ public class TransactionDiagram extends GridPane {
     }
 
     private int getOutputIndex(Address address, long amount, Collection<Integer> seenIndexes) {
-        List<TransactionOutput> addressOutputs = walletTx.getTransaction().getOutputs().stream().filter(txOutput -> txOutput.getScript().getToAddress() != null).collect(Collectors.toList());
-        TransactionOutput output = addressOutputs.stream().filter(txOutput -> address.equals(txOutput.getScript().getToAddress()) && txOutput.getValue() == amount && !seenIndexes.contains(txOutput.getIndex())).findFirst().orElseThrow();
+        List<TransactionOutput> addressOutputs = walletTx.getOutputs().stream().filter(output -> !(output instanceof WalletTransaction.NonAddressOutput))
+                .map(WalletTransaction.Output::getTransactionOutput).collect(Collectors.toList());
+        TransactionOutput output = addressOutputs.stream()
+                .filter(txOutput -> address.equals(txOutput.getScript().getToAddress()) && txOutput.getValue() == amount && !seenIndexes.contains(txOutput.getIndex()))
+                .findFirst().orElseThrow();
         return addressOutputs.indexOf(output);
     }
 
@@ -1111,7 +1156,7 @@ public class TransactionDiagram extends GridPane {
         }
 
         public String toString() {
-            return additionalPayments.stream().map(payment -> payment.getAddress().toString()).collect(Collectors.joining("\n"));
+            return additionalPayments.stream().map(Payment::toString).collect(Collectors.joining("\n"));
         }
     }
 
@@ -1120,25 +1165,27 @@ public class TransactionDiagram extends GridPane {
         public Address address;
         public long amount;
         public PaymentCode paymentCode;
+        public SilentPaymentAddress silentPaymentAddress;
 
         public OutputNode(Pane outputLabel, Address address, long amount) {
-            this(outputLabel, address, amount, null);
+            this(outputLabel, address, amount, null, null);
         }
 
-        public OutputNode(Pane outputLabel, Address address, long amount, PaymentCode paymentCode) {
+        public OutputNode(Pane outputLabel, Address address, long amount, PaymentCode paymentCode, SilentPaymentAddress silentPaymentAddress) {
             this.outputLabel = outputLabel;
             this.address = address;
             this.amount = amount;
             this.paymentCode = paymentCode;
+            this.silentPaymentAddress = silentPaymentAddress;
         }
     }
 
     private class LabelContextMenu extends ContextMenu {
         public LabelContextMenu(Address address, long value) {
-            this(address, value, null);
+            this(address, value, null, null);
         }
 
-        public LabelContextMenu(Address address, long value, PaymentCode paymentCode) {
+        public LabelContextMenu(Address address, long value, PaymentCode paymentCode, SilentPaymentAddress silentPaymentAddress) {
             if(address != null) {
                 MenuItem copyAddress = new MenuItem("Copy Address");
                 copyAddress.setOnAction(event -> {
@@ -1185,6 +1232,17 @@ public class TransactionDiagram extends GridPane {
                     Clipboard.getSystemClipboard().setContent(content);
                 });
                 getItems().add(copyPaymentCode);
+            }
+
+            if(silentPaymentAddress != null) {
+                MenuItem copySilentPaymentAddress = new MenuItem("Copy Silent Payment Address");
+                copySilentPaymentAddress.setOnAction(AE -> {
+                    hide();
+                    ClipboardContent content = new ClipboardContent();
+                    content.putString(silentPaymentAddress.toString());
+                    Clipboard.getSystemClipboard().setContent(content);
+                });
+                getItems().add(copySilentPaymentAddress);
             }
         }
     }

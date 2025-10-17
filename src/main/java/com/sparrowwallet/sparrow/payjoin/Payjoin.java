@@ -40,6 +40,10 @@ public class Payjoin {
         this.wallet = wallet;
         this.psbt = psbt;
 
+        if(payjoinURI.getAddress() == null) {
+            throw new IllegalArgumentException("Payjoin URI must have an address");
+        }
+
         for(PSBTInput psbtInput : psbt.getPsbtInputs()) {
             if(psbtInput.getUtxo() == null) {
                 throw new IllegalArgumentException("Original PSBT for payjoin transaction must have non_witness_utxo or witness_utxo fields for all inputs");
@@ -104,6 +108,9 @@ public class Payjoin {
         } catch(PSBTParseException e) {
             log.error("Error parsing received PSBT", e);
             throw new PayjoinReceiverException("Payjoin receiver returned invalid PSBT", e);
+        } catch(PayjoinReceiverException e) {
+            log.error("Payjoin receiver error", e);
+            throw e;
         } catch(Exception e) {
             log.error("Payjoin error", e);
             throw new PayjoinReceiverException("Payjoin error", e);

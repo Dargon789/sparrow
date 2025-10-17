@@ -3,13 +3,14 @@ package com.sparrowwallet.sparrow;
 import com.beust.jcommander.JCommander;
 import com.google.common.eventbus.Subscribe;
 import com.sparrowwallet.drongo.*;
+import com.sparrowwallet.drongo.address.Address;
 import com.sparrowwallet.drongo.crypto.*;
+import com.sparrowwallet.drongo.dns.DnsPayment;
+import com.sparrowwallet.drongo.dns.DnsPaymentCache;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
-import com.sparrowwallet.drongo.psbt.PSBT;
-import com.sparrowwallet.drongo.psbt.PSBTInput;
-import com.sparrowwallet.drongo.psbt.PSBTParseException;
-import com.sparrowwallet.drongo.psbt.PSBTSignatureException;
+import com.sparrowwallet.drongo.psbt.*;
+import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
 import com.sparrowwallet.drongo.wallet.*;
 import com.sparrowwallet.hummingbird.UR;
 import com.sparrowwallet.hummingbird.registry.CryptoPSBT;
@@ -30,7 +31,7 @@ import com.sparrowwallet.sparrow.transaction.TransactionView;
 import com.sparrowwallet.sparrow.wallet.Entry;
 import com.sparrowwallet.sparrow.wallet.WalletController;
 import com.sparrowwallet.sparrow.wallet.WalletForm;
-import de.codecentric.centerdevice.MenuToolkit;
+import de.jangassen.MenuToolkit;
 import javafx.animation.*;
 import javafx.application.Platform;
 import javafx.beans.binding.Bindings;
@@ -49,12 +50,14 @@ import javafx.geometry.Side;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.image.Image;
-import javafx.scene.image.ImageView;
+import javafx.scene.control.Label;
+import javafx.scene.control.Menu;
+import javafx.scene.control.MenuItem;
 import javafx.scene.input.*;
 import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 import javafx.stage.*;
+import javafx.stage.Window;
 import javafx.util.Duration;
 import org.controlsfx.control.Notifications;
 import org.controlsfx.control.StatusBar;
@@ -69,6 +72,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.text.ParseException;
 import java.util.*;
+import java.util.List;
 import java.util.stream.Collectors;
 
 import static com.sparrowwallet.sparrow.AppServices.*;
@@ -822,10 +826,10 @@ public class AppController implements Initializable {
                 try(FileOutputStream outputStream = new FileOutputStream(file)) {
                     if(asText) {
                         PrintWriter writer = new PrintWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
-                        writer.print(transactionTabData.getPsbt().toBase64String(includeXpubs));
+                        writer.print(transactionTabData.getPsbt().getForExport().toBase64String(includeXpubs));
                         writer.flush();
                     } else {
-                        outputStream.write(transactionTabData.getPsbt().serialize(includeXpubs, true));
+                        outputStream.write(transactionTabData.getPsbt().getForExport().serialize(includeXpubs, true));
                     }
                 } catch(IOException e) {
                     log.error("Error saving PSBT", e);
@@ -848,7 +852,7 @@ public class AppController implements Initializable {
         TabData tabData = (TabData)selectedTab.getUserData();
         if(tabData.getType() == TabData.TabType.TRANSACTION) {
             TransactionTabData transactionTabData = (TransactionTabData)tabData;
-            String data = asBase64 ? transactionTabData.getPsbt().toBase64String() : transactionTabData.getPsbt().toString();
+            String data = asBase64 ? transactionTabData.getPsbt().getForExport().toBase64String() : transactionTabData.getPsbt().getForExport().toString();
 
             ClipboardContent content = new ClipboardContent();
             content.putString(data);
@@ -862,7 +866,7 @@ public class AppController implements Initializable {
         if(tabData.getType() == TabData.TabType.TRANSACTION) {
             TransactionTabData transactionTabData = (TransactionTabData)tabData;
 
-            byte[] psbtBytes = transactionTabData.getPsbt().serialize();
+            byte[] psbtBytes = transactionTabData.getPsbt().getForExport().serialize();
             CryptoPSBT cryptoPSBT = new CryptoPSBT(psbtBytes);
             BBQR bbqr = new BBQR(BBQRType.PSBT, psbtBytes);
             QRDisplayDialog qrDisplayDialog = new QRDisplayDialog(cryptoPSBT.toUR(), bbqr, false, true, false);
@@ -1897,6 +1901,11 @@ public class AppController implements Initializable {
     }
 
     private void addTransactionTab(String name, File file, PSBT psbt) {
+        //Convert to PSBTv0 first
+        if(psbt.getVersion() != null && psbt.getVersion() >= 2) {
+            psbt.convertVersion(0);
+        }
+
         //Add any missing previous outputs if available in open wallets
         for(PSBTInput psbtInput : psbt.getPsbtInputs()) {
             if(psbtInput.getUtxo() == null) {
@@ -1911,6 +1920,39 @@ public class AppController implements Initializable {
                             psbtInput.setNonWitnessUtxo(null);
                         }
                         break;
+                    }
+                }
+            }
+        }
+
+        //Add DNS payment information if not already cached
+        for(PSBTOutput psbtOutput : psbt.getPsbtOutputs()) {
+            if(psbtOutput.getDnssecProof() != null && !psbtOutput.getDnssecProof().isEmpty()) {
+                Address address = psbtOutput.getScript() != null ? psbtOutput.getScript().getToAddress() : null;
+                if(address != null && DnsPaymentCache.getDnsPayment(address) == null) {
+                    try {
+                        Optional<DnsPayment> optDnsPayment = psbtOutput.getDnsPayment();
+                        if(optDnsPayment.isPresent() && address.equals(optDnsPayment.get().bitcoinURI().getAddress())) {
+                            DnsPaymentCache.putDnsPayment(address, optDnsPayment.get());
+                        }
+                    } catch(Exception e) {
+                        log.debug("Error resolving DNS payment", e);
+                    }
+                }
+
+                SilentPaymentAddress silentPaymentAddress = psbtOutput.getSilentPaymentAddress();
+                if(address != null && silentPaymentAddress == null) {
+                    silentPaymentAddress = AppServices.get().getOpenWallets().keySet().stream()
+                            .map(wallet -> wallet.getSilentPaymentAddress(address)).filter(Objects::nonNull).findFirst().orElse(null);
+                }
+                if(silentPaymentAddress != null && DnsPaymentCache.getDnsPayment(silentPaymentAddress) == null) {
+                    try {
+                        Optional<DnsPayment> optDnsPayment = psbtOutput.getDnsPayment();
+                        if(optDnsPayment.isPresent() && silentPaymentAddress.equals(optDnsPayment.get().bitcoinURI().getSilentPaymentAddress())) {
+                            DnsPaymentCache.putDnsPayment(silentPaymentAddress, optDnsPayment.get());
+                        }
+                    } catch(Exception e) {
+                        log.debug("Error resolving DNS payment", e);
                     }
                 }
             }
@@ -2054,23 +2096,33 @@ public class AppController implements Initializable {
         }
 
         MenuItem moveRight = new MenuItem("Move Right");
+        moveRight.setAccelerator(new KeyCodeCombination(KeyCode.RIGHT, KeyCombination.CONTROL_DOWN, KeyCombination.SHIFT_DOWN));
         moveRight.setOnAction(event -> {
-            int index = tabs.getTabs().indexOf(tab);
+            int currentIndex = tabs.getSelectionModel().getSelectedIndex();
+            if(currentIndex + 1 >= tabs.getTabs().size()) {
+                return;
+            }
+            Tab selectedTab = tabs.getSelectionModel().getSelectedItem();
             tabs.getTabs().removeListener(tabsChangeListener);
-            tabs.getTabs().remove(tab);
-            tabs.getTabs().add(index + 1, tab);
+            tabs.getTabs().remove(selectedTab);
+            tabs.getTabs().add(currentIndex + 1, selectedTab);
             tabs.getTabs().addListener(tabsChangeListener);
-            tabs.getSelectionModel().select(tab);
+            tabs.getSelectionModel().select(selectedTab);
             EventManager.get().post(new RequestOpenWalletsEvent());   //Rearrange recent files list
         });
         MenuItem moveLeft = new MenuItem("Move Left");
+        moveLeft.setAccelerator(new KeyCodeCombination(KeyCode.LEFT, KeyCombination.CONTROL_DOWN, KeyCombination.SHIFT_DOWN));
         moveLeft.setOnAction(event -> {
-            int index = tabs.getTabs().indexOf(tab);
+            int currentIndex = tabs.getSelectionModel().getSelectedIndex();
+            if(currentIndex == 0) {
+                return;
+            }
+            Tab selectedTab = tabs.getSelectionModel().getSelectedItem();
             tabs.getTabs().removeListener(tabsChangeListener);
-            tabs.getTabs().remove(tab);
-            tabs.getTabs().add(index - 1, tab);
+            tabs.getTabs().remove(selectedTab);
+            tabs.getTabs().add(currentIndex - 1, selectedTab);
             tabs.getTabs().addListener(tabsChangeListener);
-            tabs.getSelectionModel().select(tab);
+            tabs.getSelectionModel().select(selectedTab);
             EventManager.get().post(new RequestOpenWalletsEvent());   //Rearrange recent files list
         });
         contextMenu.getItems().addAll(moveRight, moveLeft);

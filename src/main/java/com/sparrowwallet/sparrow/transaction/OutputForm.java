@@ -89,7 +89,11 @@ public class OutputForm extends IndexedTransactionForm {
                     }
                 } else if(output instanceof WalletTransaction.PaymentOutput paymentOutput) {
                     Payment payment = paymentOutput.getPayment();
-                    return new Label(payment.getLabel() != null && payment.getType() != Payment.Type.FAKE_MIX && payment.getType() != Payment.Type.MIX ? payment.getLabel() : payment.getAddress().toString(),
+                    return new Label(payment.getLabel() != null && payment.getType() != Payment.Type.FAKE_MIX && payment.getType() != Payment.Type.MIX ? payment.getLabel() : payment.toString(),
+                            GlyphUtils.getOutputGlyph(getWalletTransaction(), payment));
+                } else if(output instanceof WalletTransaction.ConsolidationOutput consolidationOutput) {
+                    Payment payment = consolidationOutput.getWalletNodePayment();
+                    return new Label(payment.getLabel() != null && payment.getType() != Payment.Type.FAKE_MIX && payment.getType() != Payment.Type.MIX ? payment.getLabel() : payment.toString(),
                             GlyphUtils.getOutputGlyph(getWalletTransaction(), payment));
                 } else if(output instanceof WalletTransaction.ChangeOutput changeOutput) {
                     return new Label("Change", GlyphUtils.getChangeGlyph());
