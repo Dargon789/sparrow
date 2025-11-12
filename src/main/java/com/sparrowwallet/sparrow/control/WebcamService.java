@@ -7,6 +7,7 @@ import com.google.zxing.qrcode.QRCodeReader;
 import com.sparrowwallet.bokmakierie.Bokmakierie;
 import com.sparrowwallet.drongo.OsType;
 import com.sparrowwallet.sparrow.io.Config;
+import com.sparrowwallet.sparrow.io.ZBar;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.SimpleBooleanProperty;
@@ -15,7 +16,6 @@ import javafx.concurrent.ScheduledService;
 import javafx.concurrent.Task;
 import javafx.embed.swing.SwingFXUtils;
 import javafx.scene.image.Image;
-import net.sourceforge.zbar.ZBar;
 import org.openpnp.capture.*;
 import org.openpnp.capture.library.OpenpnpCaptureLibrary;
 import org.slf4j.Logger;
@@ -137,13 +137,17 @@ public class WebcamService extends ScheduledService<Image> {
 
                         if(device != null) {
                             for(CaptureDevice webcam : availableDevices) {
-                                if(webcam.getName().equals(device.getName())) {
+                                if(webcam.equals(device)) {
                                     selectedDevice = webcam;
                                     break;
                                 }
                             }
                         } else if(Config.get().getWebcamDevice() != null) {
                             for(CaptureDevice webcam : availableDevices) {
+                                if(webcam.getUniqueId().equals(Config.get().getWebcamDeviceId())) {
+                                    selectedDevice = webcam;
+                                    break;
+                                }
                                 if(webcam.getName().equals(Config.get().getWebcamDevice())) {
                                     selectedDevice = webcam;
                                     break;
@@ -315,9 +319,6 @@ public class WebcamService extends ScheduledService<Image> {
     }
 
     private Result readQR(BufferedImage bufferedImage) {
-        LuminanceSource source = new BufferedImageLuminanceSource(bufferedImage);
-        BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-
         try {
             com.sparrowwallet.bokmakierie.Result result = bokmakierie.scan(bufferedImage);
             if(result != null) {
@@ -335,6 +336,8 @@ public class WebcamService extends ScheduledService<Image> {
         }
 
         try {
+            LuminanceSource source = new BufferedImageLuminanceSource(bufferedImage);
+            BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
             return qrReader.decode(bitmap, Map.of(DecodeHintType.TRY_HARDER, Boolean.TRUE));
         } catch(ReaderException e) {
             // fall thru, it means there is no QR code in image

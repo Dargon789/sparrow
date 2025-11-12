@@ -4,9 +4,12 @@ import com.sparrowwallet.drongo.KeyPurpose;
 import com.sparrowwallet.drongo.SecureString;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.address.Address;
+import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.*;
 import com.sparrowwallet.drongo.psbt.PSBT;
 import com.sparrowwallet.drongo.psbt.PSBTInput;
+import com.sparrowwallet.drongo.silentpayments.SilentPayment;
+import com.sparrowwallet.drongo.silentpayments.SilentPaymentAddress;
 import com.sparrowwallet.drongo.uri.BitcoinURI;
 import com.sparrowwallet.drongo.wallet.*;
 import com.sparrowwallet.hummingbird.UR;
@@ -57,7 +60,6 @@ import tornadofx.control.Fieldset;
 import com.google.common.eventbus.Subscribe;
 import tornadofx.control.Form;
 
-import javax.swing.text.html.Option;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -179,6 +181,15 @@ public class HeadersController extends TransactionFormController implements Init
 
     @FXML
     private CopyableLabel blockTimestamp;
+
+    @FXML
+    private Field signedByField;
+
+    @FXML
+    private CopyableLabel signedBy;
+
+    @FXML
+    private Form blockchainSpacerForm;
 
     @FXML
     private Form signingWalletForm;
@@ -451,6 +462,7 @@ public class HeadersController extends TransactionFormController implements Init
         headersForm.setWalletTransaction(getWalletTransaction(headersForm.getInputTransactions()));
 
         blockchainForm.managedProperty().bind(blockchainForm.visibleProperty());
+        blockchainSpacerForm.managedProperty().bind(blockchainForm.managedProperty());
 
         signingWalletForm.managedProperty().bind(signingWalletForm.visibleProperty());
         sigHashForm.managedProperty().bind(sigHashForm.visibleProperty());
@@ -636,24 +648,27 @@ public class HeadersController extends TransactionFormController implements Init
             }
 
             List<Payment> payments = new ArrayList<>();
+            List<WalletTransaction.Output> outputs = new ArrayList<>();
             Map<WalletNode, Long> changeMap = new LinkedHashMap<>();
+            Map<Script, WalletNode> receiveOutputScripts = wallet.getWalletOutputScripts(KeyPurpose.RECEIVE);
             Map<Script, WalletNode> changeOutputScripts = wallet.getWalletOutputScripts(wallet.getChangeKeyPurpose());
             for(TransactionOutput txOutput : headersForm.getTransaction().getOutputs()) {
                 WalletNode changeNode = changeOutputScripts.get(txOutput.getScript());
                 if(changeNode != null) {
                     if(headersForm.getTransaction().getOutputs().size() == 4 && headersForm.getTransaction().getOutputs().stream().anyMatch(txo -> txo != txOutput && txo.getValue() == txOutput.getValue())) {
                         if(selectedTxos.values().stream().allMatch(Objects::nonNull)) {
-                            payments.add(new Payment(txOutput.getScript().getToAddress(), ".." + changeNode + " (Fake Mix)", txOutput.getValue(), false, Payment.Type.FAKE_MIX));
+                            payments.add(new WalletNodePayment(changeNode, ".." + changeNode + " (Fake Mix)", txOutput.getValue(), false, Payment.Type.FAKE_MIX));
                         } else {
-                            payments.add(new Payment(txOutput.getScript().getToAddress(), ".." + changeNode + " (Mix)", txOutput.getValue(), false, Payment.Type.MIX));
+                            payments.add(new WalletNodePayment(changeNode, ".." + changeNode + " (Mix)", txOutput.getValue(), false, Payment.Type.MIX));
                         }
                     } else {
                         if(changeMap.containsKey(changeNode)) {
-                            payments.add(new Payment(txOutput.getScript().getToAddress(), headersForm.getName(), txOutput.getValue(), false, Payment.Type.DEFAULT));
+                            payments.add(new WalletNodePayment(changeNode, headersForm.getName(), txOutput.getValue(), false, Payment.Type.DEFAULT));
                         } else {
                             changeMap.put(changeNode, txOutput.getValue());
                         }
                     }
+                    outputs.add(new WalletTransaction.ChangeOutput(txOutput, changeNode, txOutput.getValue()));
                 } else {
                     Payment.Type paymentType = Payment.Type.DEFAULT;
                     Wallet masterWallet = wallet.isMasterWallet() ? wallet : wallet.getMasterWallet();
@@ -664,24 +679,44 @@ public class HeadersController extends TransactionFormController implements Init
 
                     BlockTransactionHashIndex receivedTxo = walletTxos.keySet().stream().filter(txo -> txo.getHash().equals(txOutput.getHash()) && txo.getIndex() == txOutput.getIndex()).findFirst().orElse(null);
                     String label = headersForm.getName() == null || (headersForm.getName().startsWith("[") && headersForm.getName().endsWith("]") && headersForm.getName().length() == 8) ? null : headersForm.getName();
-                    try {
-                        Payment payment = new Payment(txOutput.getScript().getToAddresses()[0], receivedTxo != null ? receivedTxo.getLabel() : label, txOutput.getValue(), false, paymentType);
+                    Address address = txOutput.getScript().getToAddress();
+                    WalletNode receiveNode = receiveOutputScripts.get(txOutput.getScript());
+                    SilentPaymentAddress silentPaymentAddress = headersForm.getSilentPaymentAddress(txOutput);
+                    label = receivedTxo != null ? receivedTxo.getLabel() : label;
+                    if(address != null || silentPaymentAddress != null) {
+                        Payment payment;
+                        if(silentPaymentAddress != null) {
+                            payment = new SilentPayment(silentPaymentAddress, address, label, txOutput.getValue(), false);
+                        } else if(receiveNode != null) {
+                            payment = new WalletNodePayment(receiveNode, label, txOutput.getValue(), false, paymentType);
+                        } else {
+                            payment = new Payment(address, label, txOutput.getValue(), false, paymentType);
+                        }
                         WalletTransaction createdTx = AppServices.get().getCreatedTransaction(selectedTxos.keySet());
                         if(createdTx != null) {
-                            Optional<String> optLabel = createdTx.getPayments().stream().filter(pymt -> pymt.getAddress().equals(payment.getAddress()) && pymt.getAmount() == payment.getAmount()).map(Payment::getLabel).findFirst();
+                            Optional<String> optLabel = createdTx.getPayments().stream()
+                                    .filter(pymt -> (pymt instanceof SilentPayment silentPayment ? silentPayment.getSilentPaymentAddress().equals(silentPaymentAddress) :
+                                            pymt.getAddress().equals(payment.getAddress())) && pymt.getAmount() == payment.getAmount()).map(Payment::getLabel).findFirst();
                             if(optLabel.isPresent()) {
                                 payment.setLabel(optLabel.get());
                                 outputIndexLabels.put(txOutput.getIndex(), optLabel.get());
                             }
                         }
                         payments.add(payment);
-                    } catch(Exception e) {
-                        //ignore
+                        if(payment instanceof SilentPayment silentPayment) {
+                            outputs.add(new WalletTransaction.SilentPaymentOutput(txOutput, silentPayment));
+                        } else if(payment instanceof WalletNodePayment walletNodePayment) {
+                            outputs.add(new WalletTransaction.ConsolidationOutput(txOutput, walletNodePayment, walletNodePayment.getAmount()));
+                        } else {
+                            outputs.add(new WalletTransaction.PaymentOutput(txOutput, payment));
+                        }
+                    } else {
+                        outputs.add(new WalletTransaction.NonAddressOutput(txOutput));
                     }
                 }
             }
 
-            return new WalletTransaction(wallet, headersForm.getTransaction(), Collections.emptyList(), List.of(selectedTxos), payments, changeMap, fee.getValue(), walletInputTransactions);
+            return new WalletTransaction(wallet, headersForm.getTransaction(), Collections.emptyList(), List.of(selectedTxos), payments, outputs, changeMap, fee.getValue(), walletInputTransactions);
         } else {
             Map<BlockTransactionHashIndex, WalletNode> selectedTxos = headersForm.getTransaction().getInputs().stream()
                     .collect(Collectors.toMap(txInput -> getBlockTransactionInput(inputTransactions, txInput),
@@ -691,16 +726,25 @@ public class HeadersController extends TransactionFormController implements Init
             selectedTxos.entrySet().forEach(entry -> entry.setValue(null));
 
             List<Payment> payments = new ArrayList<>();
+            List<WalletTransaction.Output> outputs = new ArrayList<>();
             for(TransactionOutput txOutput : headersForm.getTransaction().getOutputs()) {
-                try {
-                    BlockTransactionHashIndex receivedTxo = getBlockTransactionOutput(txOutput);
-                    payments.add(new Payment(txOutput.getScript().getToAddresses()[0], receivedTxo != null ? receivedTxo.getLabel() : null, txOutput.getValue(), false));
-                } catch(Exception e) {
-                    //ignore
+                Address address = txOutput.getScript().getToAddress();
+                SilentPaymentAddress silentPaymentAddress = headersForm.getSilentPaymentAddress(txOutput);
+                BlockTransactionHashIndex receivedTxo = getBlockTransactionOutput(txOutput);
+                String label = receivedTxo != null ? receivedTxo.getLabel() : null;
+                if(address != null || silentPaymentAddress != null) {
+                    Payment payment = (silentPaymentAddress == null ?
+                            new Payment(address, label, txOutput.getValue(), false) :
+                            new SilentPayment(silentPaymentAddress, address, label, txOutput.getValue(), false));
+                    payments.add(payment);
+                    outputs.add(payment instanceof SilentPayment silentPayment ? new WalletTransaction.SilentPaymentOutput(txOutput, silentPayment) :
+                            new WalletTransaction.PaymentOutput(txOutput, payment));
+                } else {
+                    outputs.add(new WalletTransaction.NonAddressOutput(txOutput));
                 }
             }
 
-            return new WalletTransaction(null, headersForm.getTransaction(), Collections.emptyList(), List.of(selectedTxos), payments, Collections.emptyMap(), fee.getValue(), inputTransactions);
+            return new WalletTransaction(null, headersForm.getTransaction(), Collections.emptyList(), List.of(selectedTxos), payments, outputs, Collections.emptyMap(), fee.getValue(), inputTransactions);
         }
     }
 
@@ -774,6 +818,7 @@ public class HeadersController extends TransactionFormController implements Init
 
         blockHeightField.managedProperty().bind(blockHeightField.visibleProperty());
         blockTimestampField.managedProperty().bind(blockTimestampField.visibleProperty());
+        signedByField.managedProperty().bind(signedByField.visibleProperty());
 
         if(blockTransaction.getHeight() > 0) {
             blockHeightField.setVisible(true);
@@ -790,6 +835,19 @@ public class HeadersController extends TransactionFormController implements Init
             blockTimestamp.setContextMenu(new BlockHeightContextMenu(blockTransaction));
         } else {
             blockTimestampField.setVisible(false);
+        }
+
+        if(headersForm.getWalletTransaction() != null && headersForm.getWalletTransaction().getWallet() != null
+                && headersForm.getWalletTransaction().getWallet().getPolicyType() == PolicyType.MULTI
+                && headersForm.getWalletTransaction().getWallet().getDefaultPolicy().getNumSignaturesRequired() < headersForm.getWalletTransaction().getWallet().getKeystores().size()) {
+            signedByField.setVisible(true);
+            Wallet wallet = headersForm.getWalletTransaction().getWallet();
+            Map<TransactionInput, Map<TransactionSignature, Keystore>> signedKeystores = wallet.getSignedKeystores(blockTransaction.getTransaction());
+            StringJoiner joiner = new StringJoiner(", ");
+            signedKeystores.values().stream().flatMap(map -> map.values().stream()).distinct().forEach(keystore -> joiner.add(keystore.getLabel()));
+            signedBy.setText(joiner.toString());
+        } else {
+            signedByField.setVisible(false);
         }
     }
 
@@ -927,7 +985,7 @@ public class HeadersController extends TransactionFormController implements Init
 
         //Don't include non witness utxo fields for segwit wallets when displaying the PSBT as a QR - it can add greatly to the time required for scanning
         boolean includeNonWitnessUtxos = !Arrays.asList(ScriptType.WITNESS_TYPES).contains(headersForm.getSigningWallet().getScriptType());
-        byte[] psbtBytes = headersForm.getPsbt().serialize(true, includeNonWitnessUtxos);
+        byte[] psbtBytes = headersForm.getPsbt().getForExport().serialize(true, includeNonWitnessUtxos);
 
         CryptoPSBT cryptoPSBT = new CryptoPSBT(psbtBytes);
         BBQR bbqr = addBbqrOption ? new BBQR(BBQRType.PSBT, psbtBytes) : null;
@@ -1010,7 +1068,7 @@ public class HeadersController extends TransactionFormController implements Init
             }
 
             try(FileOutputStream outputStream = new FileOutputStream(file)) {
-                outputStream.write(headersForm.getPsbt().serialize());
+                outputStream.write(headersForm.getPsbt().getForExport().serialize());
             } catch(IOException e) {
                 log.error("Error saving PSBT", e);
                 AppServices.showErrorDialog("Error saving PSBT", "Cannot write to " + file.getAbsolutePath());
@@ -1067,7 +1125,12 @@ public class HeadersController extends TransactionFormController implements Init
 
     private void signUnencryptedKeystores(Wallet unencryptedWallet) {
         try {
-            unencryptedWallet.sign(headersForm.getPsbt());
+            Map<PSBTInput, WalletNode> signingNodes = unencryptedWallet.getSigningNodes(headersForm.getPsbt());
+            List<SilentPayment> silentPayments = unencryptedWallet.computeSilentPaymentOutputs(headersForm.getPsbt(), signingNodes);
+            if(!silentPayments.isEmpty()) {
+                EventManager.get().post(new TransactionOutputsChangedEvent(headersForm.getTransaction()));
+            }
+            unencryptedWallet.sign(signingNodes);
             updateSignedKeystores(headersForm.getSigningWallet());
         } catch(Exception e) {
             log.warn("Failed to Sign", e);
@@ -1139,7 +1202,7 @@ public class HeadersController extends TransactionFormController implements Init
 
         if(fee.getValue() > 0) {
             double feeRateAmt = fee.getValue() / headersForm.getTransaction().getVirtualSize();
-            if(feeRateAmt > AppServices.LONG_FEE_RATES_RANGE.get(AppServices.LONG_FEE_RATES_RANGE.size() - 1)) {
+            if(feeRateAmt > AppServices.getLongFeeRatesRange().getLast()) {
                 Optional<ButtonType> optType = AppServices.showWarningDialog("Very high fee rate!",
                         "This transaction pays a very high fee rate of " + String.format("%.0f", feeRateAmt) + " sats/vB.\n\nBroadcast this transaction?", ButtonType.YES, ButtonType.NO);
                 if(optType.isPresent() && optType.get() == ButtonType.NO) {
@@ -1225,9 +1288,17 @@ public class HeadersController extends TransactionFormController implements Init
 
             UnitFormat format = Config.get().getUnitFormat() == null ? UnitFormat.DOT : Config.get().getUnitFormat();
             if(failMessage.startsWith("min relay fee not met")) {
-                AppServices.showErrorDialog("Error broadcasting transaction", "The fee rate for the signed transaction is below the minimum " + format.getCurrencyFormat().format(AppServices.getMinimumRelayFeeRate()) + " sats/vB. " +
-                        "This usually happens because a keystore has created a signature that is larger than necessary.\n\n" +
-                        "You can solve this by recreating the transaction with a slightly increased fee rate.");
+                if(AppServices.getServerMinimumRelayFeeRate() != null && !AppServices.getServerMinimumRelayFeeRate().equals(AppServices.getMinimumRelayFeeRate())) {
+                    AppServices.showErrorDialog("Error broadcasting transaction", "The fee rate for the signed transaction is below the minimum configured relay fee rate for the server of " +
+                            format.getCurrencyFormat().format(AppServices.getServerMinimumRelayFeeRate()) + " sats/vB.");
+                } else {
+                    Double minRelayFeeRate = AppServices.getServerMinimumRelayFeeRate() != null ? AppServices.getServerMinimumRelayFeeRate() : AppServices.getMinimumRelayFeeRate();
+                    AppServices.showErrorDialog("Error broadcasting transaction", "The fee rate for the signed transaction is below the minimum " + format.getCurrencyFormat().format(minRelayFeeRate) + " sats/vB. " +
+                            "This usually happens because a keystore has created a signature that is larger than necessary.\n\n" +
+                            "You can solve this by recreating the transaction with a slightly increased fee rate.");
+                }
+            } else if(failMessage.startsWith("dust")) {
+                AppServices.showErrorDialog("Error broadcasting transaction", "The server will not accept this transaction for broadcast due to its configured dust limit policy.");
             } else if(failMessage.startsWith("bad-txns-inputs-missingorspent")) {
                 AppServices.showErrorDialog("Error broadcasting transaction", "The server returned an error indicating some or all of the UTXOs this transaction is spending are missing or have already been spent.");
             } else if(failMessage.contains("mempool min fee not met")) {
@@ -1428,6 +1499,7 @@ public class HeadersController extends TransactionFormController implements Init
             errorGlyph.getStyleClass().add("failure");
             blockHeightField.setVisible(false);
             blockTimestampField.setVisible(false);
+            signedByField.setVisible(false);
         }
     }
 
@@ -1588,6 +1660,13 @@ public class HeadersController extends TransactionFormController implements Init
     }
 
     @Subscribe
+    public void transactionOutputsChanged(TransactionOutputsChangedEvent event) {
+        if(event.getTransaction().equals(headersForm.getTransaction())) {
+            headersForm.setWalletTransaction(getWalletTransaction(headersForm.getInputTransactions()));
+        }
+    }
+
+    @Subscribe
     public void transactionExtracted(TransactionExtractedEvent event) {
         if(event.getPsbt().equals(headersForm.getPsbt())) {
             updateTxId();
@@ -1700,6 +1779,12 @@ public class HeadersController extends TransactionFormController implements Init
         if(broadcastProgressBar.getProgress() < 0) {
             broadcastProgressBar.setProgress(0);
         }
+    }
+
+    @Subscribe
+    public void hideAmountsStatusChanged(HideAmountsStatusEvent event) {
+        transactionDiagram.update(transactionDiagram.getWalletTransaction());
+        fee.refresh();
     }
 
     private static class WalletSignComparator implements Comparator<Wallet> {

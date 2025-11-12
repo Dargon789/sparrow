@@ -2,6 +2,7 @@ package com.sparrowwallet.sparrow.io;
 
 import com.google.gson.*;
 import com.sparrowwallet.drongo.BitcoinUnit;
+import com.sparrowwallet.drongo.protocol.Transaction;
 import com.sparrowwallet.sparrow.UnitFormat;
 import com.sparrowwallet.sparrow.Mode;
 import com.sparrowwallet.sparrow.Theme;
@@ -46,6 +47,7 @@ public class Config {
     private Theme theme;
     private boolean openWalletsInNewWindows = false;
     private boolean hideEmptyUsedAddresses = false;
+    private boolean hideAmounts = false;
     private boolean showTransactionHex = true;
     private boolean showLoadingLog = true;
     private boolean showAddressTransactionCount = false;
@@ -53,6 +55,7 @@ public class Config {
     private boolean signBsmsExports = false;
     private boolean preventSleep = false;
     private Boolean connectToBroadcast;
+    private Boolean connectToResolve;
     private Boolean suggestSendToMany;
     private List<File> recentWalletFiles;
     private Integer keyDerivationPeriod;
@@ -63,6 +66,7 @@ public class Config {
     private boolean mirrorCapture = true;
     private boolean useZbar = true;
     private String webcamDevice;
+    private String webcamDeviceId;
     private ServerType serverType;
     private Server publicElectrumServer;
     private Server coreServer;
@@ -82,6 +86,7 @@ public class Config {
     private int maxPageSize = DEFAULT_PAGE_SIZE;
     private boolean usePayNym;
     private boolean mempoolFullRbf;
+    private double minRelayFeeRate = Transaction.DEFAULT_MIN_RELAY_FEE;
     private Double appWidth;
     private Double appHeight;
 
@@ -299,6 +304,15 @@ public class Config {
         flush();
     }
 
+    public boolean isHideAmounts() {
+        return hideAmounts;
+    }
+
+    public void setHideAmounts(boolean hideAmounts) {
+        this.hideAmounts = hideAmounts;
+        flush();
+    }
+
     public boolean isShowTransactionHex() {
         return showTransactionHex;
     }
@@ -359,6 +373,15 @@ public class Config {
 
     public void setConnectToBroadcast(Boolean connectToBroadcast) {
         this.connectToBroadcast = connectToBroadcast;
+        flush();
+    }
+
+    public Boolean getConnectToResolve() {
+        return connectToResolve;
+    }
+
+    public void setConnectToResolve(Boolean connectToResolve) {
+        this.connectToResolve = connectToResolve;
         flush();
     }
 
@@ -434,6 +457,15 @@ public class Config {
 
     public void setWebcamDevice(String webcamDevice) {
         this.webcamDevice = webcamDevice;
+        flush();
+    }
+
+    public String getWebcamDeviceId() {
+        return webcamDeviceId;
+    }
+
+    public void setWebcamDeviceId(String webcamDeviceId) {
+        this.webcamDeviceId = webcamDeviceId;
         flush();
     }
 
@@ -696,6 +728,14 @@ public class Config {
     public void setMempoolFullRbf(boolean mempoolFullRbf) {
         this.mempoolFullRbf = mempoolFullRbf;
         flush();
+    }
+
+    public double getMinRelayFeeRate() {
+        return minRelayFeeRate;
+    }
+
+    public void setMinRelayFeeRate(double minRelayFeeRate) {
+        this.minRelayFeeRate = minRelayFeeRate;
     }
 
     public Double getAppWidth() {
