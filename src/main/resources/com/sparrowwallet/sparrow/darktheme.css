@@ -220,6 +220,7 @@ HorizontalHeaderColumn > TableColumnHeader.column-header.table-column{
 .root .script-pubkey { -fx-fill: #c678dd }
 .root .script-redeem, .root .script-controlblock { -fx-fill: derive(#e06c75, 20%) }
 .root .script-other { -fx-fill: #c8ccd4 }
+.root .hide-amounts .output-value { -fx-fill: derive(-fx-control-inner-background, -50%) }
 
 .root #txhex {
     -fx-background-color: derive(-fx-control-inner-background, -50%);
@@ -327,6 +328,10 @@ HorizontalHeaderColumn > TableColumnHeader.column-header.table-column{
 .root #transactionDiagram .inputs-type, .root #transactionDiagram .input-line, .root #transactionDiagram .output-line {
     -fx-text-fill: #696c77;
     -fx-stroke: #696c77;
+}
+
+#blockchainForm #blockStatus {
+    -fx-text-fill: white;
 }
 
 .root .progress-indicator.progress-timer.warn > .determinate-indicator > .indicator {

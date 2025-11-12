@@ -20,7 +20,7 @@ if(System.getProperty("os.arch") == "aarch64") {
 def headless = "true".equals(System.getProperty("java.awt.headless"))
 
 group = 'com.sparrowwallet'
-version = '2.3.1'
+version = '2.3.2'
 
 repositories {
     mavenCentral()
@@ -73,7 +73,7 @@ dependencies {
     implementation('com.fasterxml.jackson.core:jackson-databind:2.17.2')
     implementation('com.sparrowwallet:hummingbird:1.7.4')
     implementation('co.nstant.in:cbor:0.9')
-    implementation('org.openpnp:openpnp-capture-java:0.0.28-9')
+    implementation('org.openpnp:openpnp-capture-java:0.0.30-1')
     implementation("io.matthewnelson.kmp-tor:runtime:2.2.1")
     implementation("io.matthewnelson.kmp-tor:resource-exec-tor-gpl:408.16.3")
     implementation('org.jetbrains.kotlinx:kotlinx-coroutines-javafx:1.10.1') {
@@ -110,7 +110,7 @@ dependencies {
     implementation('com.github.hervegirod:fxsvgimage:1.1')
     implementation('com.sparrowwallet:toucan:0.9.0')
     implementation('com.jcraft:jzlib:1.1.3')
-    implementation('io.github.doblon8:jzbar:0.0.1')
+    implementation('io.github.doblon8:jzbar:0.2.1')
     testImplementation('org.junit.jupiter:junit-jupiter-api:5.10.0')
     testRuntimeOnly('org.junit.jupiter:junit-jupiter-engine:5.10.0')
     testRuntimeOnly('org.junit.platform:junit-platform-launcher')
@@ -265,7 +265,7 @@ jlink {
         }
         if(os.macOsX) {
             installerOptions += ['--mac-sign', '--mac-signing-key-user-name', 'Craig Raw (UPLVMSK9D7)']
-            imageOptions += ['--icon', 'src/main/deploy/package/osx/sparrow.icns', '--resource-dir', 'src/main/deploy/package/osx/']
+            imageOptions += ['--icon', 'src/main/deploy/package/macos/sparrow.icns', '--resource-dir', 'src/main/deploy/package/macos/']
             installerType = "dmg"
         }
     }
@@ -285,7 +285,8 @@ if(os.linux) {
 
 tasks.register('addUserWritePermission', Exec) {
     if(os.windows) {
-        commandLine 'icacls', "$buildDir\\image\\legal", '/grant', 'Users:(OI)(CI)F', '/T'
+        def usersGroup = '*S-1-5-32-545' // Windows "Users" group SID (language-independent)
+        commandLine 'icacls', "$buildDir\\image\\legal", '/grant', "${usersGroup}:(OI)(CI)F", '/T'
     } else {
         commandLine 'chmod', '-R', 'u+w', "$buildDir/image/legal"
     }
