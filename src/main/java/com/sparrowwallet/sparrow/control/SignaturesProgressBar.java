@@ -24,13 +24,13 @@ import java.util.List;
 
 public class SignaturesProgressBar extends SegmentedBar<SignaturesProgressBar.SignatureProgressSegment> {
     public SignaturesProgressBar() {
+        getStyleClass().add("signatures-progress-bar");
         setOrientation(Orientation.HORIZONTAL);
         setSegmentViewFactory(SignatureProgressSegmentView::new);
         setInfoNodeFactory(segment -> segment.getKeystore() == null ? null : new SignatureProgressSegmentLabel(segment.getKeystore().getLabel()));
     }
 
     public void initialize(ObservableMap<TransactionSignature, Keystore> signatureKeystoreMap, int threshold) {
-        getStyleClass().add("signatures-progress-bar");
         getSegments().clear();
 
         List<Keystore> signedKeystores = new ArrayList<>(signatureKeystoreMap.values());
@@ -48,6 +48,11 @@ public class SignaturesProgressBar extends SegmentedBar<SignaturesProgressBar.Si
             List<Keystore> newSignedKeystores = new ArrayList<>(c.getMap().values());
             int newNumSegments = Math.max(threshold, newSignedKeystores.size());
             double newSegmentSize = 100d / newNumSegments;
+
+            //Remove any surplus signatures, which a finalized transaction discards once the threshold is met
+            while(getSegments().size() > newNumSegments) {
+                getSegments().remove(getSegments().size() - 1);
+            }
 
             for(int i = 0; i < newNumSegments; i++) {
                 SignatureProgressSegment segment = null;
@@ -144,6 +149,9 @@ public class SignaturesProgressBar extends SegmentedBar<SignaturesProgressBar.Si
                     );
                     timeline.setCycleCount(1);
                     timeline.play();
+                } else if(newValue == null) {
+                    //A signature discarded on finalization or superseded by a lesser signed input leaves the segment empty
+                    progressBar.setProgress(0.0);
                 }
             });
         }

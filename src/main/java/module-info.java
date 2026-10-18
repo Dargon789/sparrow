@@ -33,7 +33,6 @@ open module com.sparrowwallet.sparrow {
     requires com.h2database;
     requires com.sparrowwallet.hummingbird;
     requires org.fxmisc.flowless;
-    requires openpnp.capture.java;
     requires nsmenufx;
     requires org.jcommander;
     requires jul.to.slf4j;
@@ -44,7 +43,6 @@ open module com.sparrowwallet.sparrow {
     requires io.reactivex.rxjava2fx;
     requires org.apache.commons.lang3;
     requires org.apache.commons.compress;
-    requires net.sourceforge.streamsupport;
     requires co.nstant.in.cbor;
     requires com.github.librepdf.openpdf;
     requires com.googlecode.lanterna;
@@ -56,6 +54,6 @@ open module com.sparrowwallet.sparrow {
     requires com.jcraft.jzlib;
     requires com.sparrowwallet.tern;
     requires com.sparrowwallet.lark;
-    requires com.sun.jna;
     requires io.github.doblon8.jzbar;
+    requires io.github.doblon8.openpnp.capture;
 }

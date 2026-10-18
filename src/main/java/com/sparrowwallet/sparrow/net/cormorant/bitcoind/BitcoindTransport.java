@@ -1,10 +1,16 @@
 package com.sparrowwallet.sparrow.net.cormorant.bitcoind;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.github.arteam.simplejsonrpc.client.Transport;
 import com.sparrowwallet.drongo.Network;
 import com.sparrowwallet.sparrow.AppServices;
+import com.sparrowwallet.sparrow.io.Config;
 import com.sparrowwallet.sparrow.io.Server;
+import com.sparrowwallet.sparrow.io.Storage;
 import com.sparrowwallet.sparrow.net.Protocol;
+import com.sparrowwallet.sparrow.net.TcpOverTlsTransport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,19 +20,33 @@ import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.cert.CertificateException;
-import java.security.cert.X509Certificate;
+import java.security.cert.Certificate;
 import java.util.Base64;
+import java.util.Set;
 
 public class BitcoindTransport implements Transport {
     private static final Logger log = LoggerFactory.getLogger(BitcoindTransport.class);
     public static final String COOKIE_FILENAME = ".cookie";
 
+    //Neither timeout was set, and HttpURLConnection defaults both to 0 (infinite), so a node that could not be reached, or that accepted the connection but never replied, hung
+    //the calling thread forever. A node is expected to be quickly reachable, but connecting to an onion address must first build a circuit.
+    private static final int CONNECT_TIMEOUT_MILLIS = 15_000;
+    private static final int ONION_CONNECT_TIMEOUT_MILLIS = 60_000;
+    //A backstop against a hung thread rather than a limit on how long the user waits, since TcpTransport already bounds the Electrum requests these calls serve. Set well beyond
+    //any legitimate call, and never below the timeout the Electrum layer above allows.
+    private static final int READ_TIMEOUT_MILLIS = 300_000;
+    //A rescan is synchronous, so importing a descriptor with an early birthday can block for hours, as can loading a wallet Bitcoin Core must first catch up to the tip
+    private static final Set<String> RESCANNING_METHODS = Set.of("importdescriptors", "loadwallet");
+    private static final JsonFactory JSON_FACTORY = new JsonFactory();
+
     private final Server bitcoindServer;
+    //Package visible so tests need not wait it out
+    int readTimeoutMillis;
     private URL bitcoindUrl;
     private File cookieFile;
     private Long cookieFileTimestamp;
     private String bitcoindAuthEncoded;
+    private SSLSocketFactory sslSocketFactory;
 
     public BitcoindTransport(Server bitcoindServer, String bitcoindWallet, String bitcoindAuth) {
         this(bitcoindServer, bitcoindWallet);
@@ -40,6 +60,7 @@ public class BitcoindTransport implements Transport {
 
     private BitcoindTransport(Server bitcoindServer, String bitcoindWallet) {
         this.bitcoindServer = bitcoindServer;
+        this.readTimeoutMillis = Math.max(READ_TIMEOUT_MILLIS, Config.get().getMaxServerTimeout() * 1000);
         try {
             String serverUrl = bitcoindServer.getUrl();
             if(!bitcoindServer.getHostAndPort().hasPort()) {
@@ -53,13 +74,20 @@ public class BitcoindTransport implements Transport {
 
     @Override
     public String pass(String request) throws IOException {
+        //Bitcoin Core RPC is a connection to the user's own node, expected to be on this computer or the local network, or reached over its onion service or a VPN or SSH tunnel.
+        //A configured proxy is therefore applied to onion addresses only - AppServices.getProxy() is also non-null whenever the internal Tor is running, and Tor can reach neither
+        //loopback nor private addresses, while routing a clearnet node through it would expose the RPC credentials below to an exit node.
+        //Configuring a node that is neither local nor onion warns the user on testing the connection or closing the dialog, see ServerSettingsController.
         Proxy proxy = AppServices.getProxy();
-        HttpURLConnection connection = proxy != null && Protocol.isOnionAddress(bitcoindServer) ? (HttpURLConnection)bitcoindUrl.openConnection(proxy) : (HttpURLConnection)bitcoindUrl.openConnection();
+        boolean useProxy = proxy != null && Protocol.isOnionAddress(bitcoindServer);
+        HttpURLConnection connection = useProxy ? (HttpURLConnection)bitcoindUrl.openConnection(proxy) : (HttpURLConnection)bitcoindUrl.openConnection();
 
         if(connection instanceof HttpsURLConnection httpsURLConnection) {
-            SSLSocketFactory sslSocketFactory = getTrustAllSocketFactory();
+            SSLSocketFactory sslSocketFactory = getSSLSocketFactory();
             if(sslSocketFactory != null) {
                 httpsURLConnection.setSSLSocketFactory(sslSocketFactory);
+                //A private node's RPC certificate is necessarily self-signed, so the certificate pinned on first use below authenticates it - there is no hostname to verify
+                httpsURLConnection.setHostnameVerifier((_, _) -> true);
             }
         }
 
@@ -72,6 +100,8 @@ public class BitcoindTransport implements Transport {
         }
 
         connection.setDoOutput(true);
+        connection.setConnectTimeout(useProxy ? ONION_CONNECT_TIMEOUT_MILLIS : CONNECT_TIMEOUT_MILLIS);
+        connection.setReadTimeout(isRescanningMethod(request) ? 0 : readTimeoutMillis);
 
         log.debug("> " + request);
 
@@ -81,8 +111,24 @@ public class BitcoindTransport implements Transport {
         }
 
         int statusCode = connection.getResponseCode();
+
+        //Trust on first use, as for non-CA-certified Electrum servers: the certificate presented by the node on the first connection is saved, and required on all connections thereafter
+        if(connection instanceof HttpsURLConnection httpsConn && Storage.getCertificateFile(bitcoindServer.getHost()) == null) {
+            try {
+                Certificate[] certs = httpsConn.getServerCertificates();
+                if(certs.length > 0) {
+                    Storage.saveCertificate(bitcoindServer.getHost(), certs[0]);
+                    sslSocketFactory = null;
+                }
+            } catch(SSLPeerUnverifiedException e) {
+                log.warn("Could not retrieve certificate for saving", e);
+            }
+        }
+
         if(statusCode == 401) {
             throw new IOException((cookieFile == null ? "User/pass" : "Cookie file") + " authentication failed");
+        } else if(statusCode == 403) {
+            throw new IOException("Bitcoin Core at " + bitcoindUrl.getAuthority() + " refused RPC access from this computer, check its rpcallowip and rpcwhitelist settings");
         }
         InputStream inputStream = connection.getErrorStream() == null ? connection.getInputStream() : connection.getErrorStream();
 
@@ -90,7 +136,9 @@ public class BitcoindTransport implements Transport {
         try(BufferedReader br = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
             String responseLine;
             while((responseLine = br.readLine()) != null) {
-                if(statusCode == 500) {
+                //Bitcoin Core returns a null result alongside the error on a failed call, which the client deserializes to a null return value instead of throwing the error.
+                //It answers 400 on an invalid request and 404 on an unknown method, so stripping the null result on 500 alone loses those errors and returns null to the caller.
+                if(statusCode >= 400) {
                     responseLine = responseLine.replace("\"result\":null,", "");
                 }
 
@@ -101,7 +149,34 @@ public class BitcoindTransport implements Transport {
         String response = res.toString();
         log.debug("< " + response);
 
+        //A response carrying neither a result nor an error leaves the client constructing a JsonRpcException from a null error message, which throws a NullPointerException naming nothing.
+        //Bitcoin Core always answers with a JSON-RPC object, so an empty or HTML body here comes from something else on the network path - typically a TLS terminating proxy sent a plain HTTP request.
+        if(!response.startsWith("{")) {
+            throw new IOException("Bitcoin Core at " + bitcoindUrl.getAuthority() + " did not return a JSON-RPC response to the " + bitcoindUrl.getProtocol() + " request (HTTP " + statusCode + ")");
+        }
+
         return response;
+    }
+
+    //Parses the method as TcpTransport does for Electrum notifications, so that a parameter value cannot match
+    static boolean isRescanningMethod(String request) {
+        try(JsonParser parser = JSON_FACTORY.createParser(request)) {
+            if(parser.nextToken() != JsonToken.START_OBJECT) {
+                return false;
+            }
+            while(parser.nextToken() == JsonToken.FIELD_NAME) {
+                String field = parser.currentName();
+                JsonToken value = parser.nextToken();
+                if("method".equals(field)) {
+                    return value == JsonToken.VALUE_STRING && RESCANNING_METHODS.contains(parser.getText());
+                }
+                parser.skipChildren();
+            }
+            return false;
+        } catch(Exception e) {
+            log.warn("Could not parse JSON-RPC request method, applying the default read timeout: " + e.getMessage());
+            return false;
+        }
     }
 
     private String getBitcoindAuthEncoded() throws IOException {
@@ -138,29 +213,24 @@ public class BitcoindTransport implements Transport {
         return bitcoindDir;
     }
 
-    private SSLSocketFactory getTrustAllSocketFactory() {
-        TrustManager[] trustAllCerts = new TrustManager[] {
-            new X509TrustManager() {
-                public X509Certificate[] getAcceptedIssuers() {
-                    return new X509Certificate[0];
-                }
-
-                public void checkClientTrusted(X509Certificate[] certs, String authType) throws CertificateException {
-                }
-
-                public void checkServerTrusted(X509Certificate[] certs, String authType) throws CertificateException {
-                }
-            }
-        };
-
-        try {
-            SSLContext sslContext = SSLContext.getInstance("TLS");
-            sslContext.init(null, trustAllCerts, null);
-            return sslContext.getSocketFactory();
-        } catch (Exception e) {
-            log.error("Error creating SSL socket factory", e);
+    private SSLSocketFactory getSSLSocketFactory() {
+        if(sslSocketFactory == null) {
+            sslSocketFactory = createSSLSocketFactory();
         }
 
-        return null;
+        return sslSocketFactory;
+    }
+
+    private SSLSocketFactory createSSLSocketFactory() {
+        try {
+            String host = bitcoindServer.getHost();
+            TrustManager[] trustManagers = TcpOverTlsTransport.getTrustManagers(Storage.getCertificateFile(host), host);
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, trustManagers, null);
+            return sslContext.getSocketFactory();
+        } catch(Exception e) {
+            log.error("Error creating SSL socket factory", e);
+            return null;
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.sparrowwallet.sparrow.net;
 
 import com.google.common.net.HostAndPort;
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import com.google.gson.annotations.SerializedName;
 import com.sparrowwallet.drongo.KeyPurpose;
 import com.sparrowwallet.drongo.Network;
@@ -23,6 +24,7 @@ import javafx.concurrent.Task;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.time.Duration;
@@ -42,22 +44,47 @@ public class Bwt {
 
     public synchronized static void initialize() {
         if(!initialized) {
+            OsType osType = OsType.getCurrent();
+            String osArch = System.getProperty("os.arch");
+            String libName;
+            if(osType == OsType.MACOS) {
+                libName = "libbwt_jni.dylib";
+            } else if(osType == OsType.WINDOWS) {
+                libName = "bwt_jni.dll";
+            } else {
+                libName = "libbwt_jni.so";
+            }
+
+            // Try loading from the application image lib/ directory
+            String javaHome = System.getProperty("java.home");
+            if(javaHome != null) {
+                File libFile = new File(javaHome, "lib" + java.io.File.separator + libName);
+                if(libFile.exists()) {
+                    try {
+                        System.load(libFile.getAbsolutePath());
+                        initialized = true;
+                        return;
+                    } catch(UnsatisfiedLinkError e) {
+                        log.debug("Could not load bwt from java.home, falling back to JAR extraction", e);
+                    }
+                }
+            }
+
+            // Fallback: extract from JAR
             try {
-                OsType osType = OsType.getCurrent();
-                String osArch = System.getProperty("os.arch");
                 if(osType == OsType.MACOS && osArch.equals("aarch64")) {
-                    NativeUtils.loadLibraryFromJar("/native/osx/aarch64/libbwt_jni.dylib");
+                    NativeUtils.loadLibraryFromJar("/native/osx/aarch64/" + libName);
                 } else if(osType == OsType.MACOS) {
-                    NativeUtils.loadLibraryFromJar("/native/osx/x64/libbwt_jni.dylib");
+                    NativeUtils.loadLibraryFromJar("/native/osx/x64/" + libName);
                 } else if(osType == OsType.WINDOWS) {
-                    NativeUtils.loadLibraryFromJar("/native/windows/x64/bwt_jni.dll");
+                    NativeUtils.loadLibraryFromJar("/native/windows/x64/" + libName);
                 } else if(osArch.equals("aarch64")) {
-                    NativeUtils.loadLibraryFromJar("/native/linux/aarch64/libbwt_jni.so");
+                    NativeUtils.loadLibraryFromJar("/native/linux/aarch64/" + libName);
                 } else {
-                    NativeUtils.loadLibraryFromJar("/native/linux/x64/libbwt_jni.so");
+                    NativeUtils.loadLibraryFromJar("/native/linux/x64/" + libName);
                 }
                 initialized = true;
-            } catch(IOException e) {
+            } catch(UnsatisfiedLinkError | IOException e) {
                 log.error("Error loading bwt library", e);
             }
         }
@@ -178,7 +205,13 @@ public class Bwt {
 
         Gson gson = new Gson();
         String jsonConfig = gson.toJson(bwtConfig);
-        log.debug("Configuring bwt: " + jsonConfig);
+        if(log.isDebugEnabled()) {
+            JsonObject loggedConfig = gson.toJsonTree(bwtConfig).getAsJsonObject();
+            if(loggedConfig.has("bitcoind_auth")) {
+                loggedConfig.addProperty("bitcoind_auth", "*****");
+            }
+            log.debug("Configuring bwt: " + loggedConfig);
+        }
 
         NativeBwtDaemon.start(jsonConfig, callback);
     }
@@ -194,15 +227,21 @@ public class Bwt {
      *
      */
     private void shutdown() {
-        if(shutdownPtr == null) {
-            terminating = true;
+        //The handle is taken before it is used, so that it is passed to the daemon once however many shutdowns are under way
+        Long ptr;
+        synchronized(this) {
+            ptr = shutdownPtr;
+            shutdownPtr = null;
+        }
+
+        //A shutdown is only requested of a running daemon, so one finding no handle has been overtaken by another and has nothing to do
+        if(ptr == null) {
             return;
         }
 
-        NativeBwtDaemon.shutdown(shutdownPtr);
+        NativeBwtDaemon.shutdown(ptr);
         this.terminating = false;
         this.ready = false;
-        this.shutdownPtr = null;
     }
 
     public boolean isRunning() {
@@ -309,7 +348,9 @@ public class Bwt {
                         public void onBooting(long shutdownPtr) {
                             log.debug("Booting bwt");
 
-                            Bwt.this.shutdownPtr = shutdownPtr;
+                            synchronized(Bwt.this) {
+                                Bwt.this.shutdownPtr = shutdownPtr;
+                            }
                             if(terminating) {
                                 Bwt.this.shutdown();
                                 terminating = false;

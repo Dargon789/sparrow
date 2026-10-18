@@ -3,6 +3,7 @@ package com.sparrowwallet.sparrow.net;
 import com.sparrowwallet.drongo.Network;
 import com.sparrowwallet.drongo.Utils;
 import com.sparrowwallet.drongo.protocol.Sha256Hash;
+import com.sparrowwallet.drongo.protocol.Transaction;
 import com.sparrowwallet.drongo.wallet.BlockTransaction;
 import com.sparrowwallet.drongo.wallet.BlockTransactionHash;
 import com.sparrowwallet.sparrow.AppServices;
@@ -30,7 +31,7 @@ public enum FeeRatesSource {
     MEMPOOL_SPACE("mempool.space", true) {
         @Override
         public Map<Integer, Double> getBlockTargetFeeRates(Map<Integer, Double> defaultblockTargetFeeRates) {
-            String url = getApiUrl() + "v1/fees/recommended";
+            String url = getApiUrl() + "v1/fees/precise";
             return getThreeTierFeeRates(this, defaultblockTargetFeeRates, url);
         }
 
@@ -69,6 +70,70 @@ public enum FeeRatesSource {
         @Override
         public boolean supportsNetwork(Network network) {
             return network == Network.MAINNET || network == Network.TESTNET || network == Network.TESTNET4 || network == Network.SIGNET;
+        }
+    },
+    BITVIEW_SPACE("bitview.space", true) {
+        @Override
+        public Map<Integer, Double> getBlockTargetFeeRates(Map<Integer, Double> defaultblockTargetFeeRates) {
+            String url = getApiUrl() + "v1/fees/precise";
+            return getThreeTierFeeRates(this, defaultblockTargetFeeRates, url);
+        }
+
+        @Override
+        public Double getNextBlockMedianFeeRate() throws Exception {
+            String url = getApiUrl() + "v1/fees/mempool-blocks";
+            return requestNextBlockMedianFeeRate(this, url);
+        }
+
+        @Override
+        public BlockSummary getBlockSummary(Sha256Hash blockId) throws Exception {
+            String url = getApiUrl() + "v1/block/" + Utils.bytesToHex(blockId.getReversedBytes());
+            return requestBlockSummary(this, url);
+        }
+
+        @Override
+        public Map<Integer, BlockSummary> getRecentBlockSummaries() throws Exception {
+            String url = getApiUrl() + "v1/blocks";
+            return requestBlockSummaries(this, url);
+        }
+
+        @Override
+        public List<BlockTransactionHash> getRecentMempoolTransactions() throws Exception {
+            String url = getApiUrl() + "mempool/recent";
+            return requestRecentMempoolTransactions(this, url);
+        }
+
+        private String getApiUrl() {
+            return "https://bitview.space/api/";
+        }
+
+        @Override
+        public boolean supportsNetwork(Network network) {
+            return network == Network.MAINNET;
+        }
+    },
+    BLOCK_XYZ("block.xyz", true) {
+        /*
+            https://engineering.block.xyz/blog/augur-an-open-source-bitcoin-fee-estimation-library
+         */
+        @Override
+        public Map<Integer, Double> getBlockTargetFeeRates(Map<Integer, Double> defaultblockTargetFeeRates) {
+            String url = "https://pricing.bitcoin.block.xyz/fees";
+            return getThreeTierFeeRates(this, defaultblockTargetFeeRates, url);
+        }
+
+        @Override
+        public boolean supportsNetwork(Network network) {
+            return network == Network.MAINNET;
+        }
+
+        @Override
+        protected ThreeTierRates getThreeTierRates(String url, HttpClientService httpClientService) throws Exception {
+            BlockXyzRates rates = httpClientService.requestJson(url, BlockXyzRates.class, null);
+            if(rates.estimates == null) {
+                throw new Exception("Invalid response from " + url);
+            }
+            return rates.getThreeTierRates();
         }
     },
     BITCOINFEES_EARN_COM("bitcoinfees.earn.com", true) {
@@ -342,6 +407,37 @@ public enum FeeRatesSource {
             return new ThreeTierRates(recommended_fee_099/1000, recommended_fee_090/1000, recommended_fee_050/1000, null);
         }
     }
+
+    private record BlockXyzRates(Map<String, BlockXyzEstimate> estimates) {
+        public ThreeTierRates getThreeTierRates() {
+            // see https://engineering.block.xyz/blog/augur-an-open-source-bitcoin-fee-estimation-library
+            //
+            // fastestFee: 95% confidence at 3 blocks
+            // halfHourFee: 80% confidence at 3 blocks
+            // hourFee: 80% confidence at 6 blocks
+            // minimumFee: 80% confidence at 144 blocks
+            Double fastestFee = getFeeRate("3", "0.95");
+            Double halfHourFee = getFeeRate("3", "0.80");
+            Double hourFee = getFeeRate("6", "0.80");
+            Double minimumFee = getFeeRate("144", "0.80");
+            return new ThreeTierRates(fastestFee, halfHourFee, hourFee, minimumFee);
+        }
+
+        private Double getFeeRate(String blocks, String probability) {
+            BlockXyzEstimate estimate = estimates.get(blocks);
+            if(estimate != null && estimate.probabilities != null) {
+                BlockXyzFeeRate feeRate = estimate.probabilities.get(probability);
+                if(feeRate != null) {
+                    return feeRate.fee_rate;
+                }
+            }
+            return Transaction.DEFAULT_MIN_RELAY_FEE;
+        }
+    }
+
+    private record BlockXyzEstimate(Map<String, BlockXyzFeeRate> probabilities) {}
+
+    private record BlockXyzFeeRate(Double fee_rate) {}
 
     protected record MempoolBlock(Integer nTx, Double medianFee) {}
 

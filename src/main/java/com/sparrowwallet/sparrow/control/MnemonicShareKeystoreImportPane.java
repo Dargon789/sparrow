@@ -162,7 +162,7 @@ public class MnemonicShareKeystoreImportPane extends MnemonicKeystorePane {
                     existing.add(wordEntriesProperty.get());
                 }
 
-                importer.getKeystore(wallet.getScriptType().getDefaultDerivation(), existing, passphraseProperty.get());
+                importer.getKeystore(wallet.getPolicyType(), wallet.getScriptType().getDefaultDerivation(), existing, passphraseProperty.get());
                 validSet = true;
                 complete = true;
             } catch(MnemonicException e) {
@@ -196,7 +196,7 @@ public class MnemonicShareKeystoreImportPane extends MnemonicKeystorePane {
         importButton = new SplitMenuButton();
         importButton.setAlignment(Pos.CENTER_RIGHT);
         importButton.setText("Import Keystore");
-        importButton.getStyleClass().add("default-button");
+        setDefaultButton(importButton);
         importButton.setOnAction(event -> {
             importButton.setDisable(true);
             importKeystore(getDefaultDerivation(), false);
@@ -240,7 +240,7 @@ public class MnemonicShareKeystoreImportPane extends MnemonicKeystorePane {
     private boolean importKeystore(List<ChildNumber> derivation, boolean dryrun) {
         importButton.setDisable(true);
         try {
-            Keystore keystore = importer.getKeystore(derivation, mnemonicShares, passphraseProperty.get());
+            Keystore keystore = importer.getKeystore(wallet.getPolicyType(), derivation, mnemonicShares, passphraseProperty.get());
             if(!dryrun) {
                 if(passphraseProperty.get() != null && !passphraseProperty.get().isEmpty()) {
                     KeystorePassphraseDialog keystorePassphraseDialog = new KeystorePassphraseDialog(null, keystore, true);
@@ -303,6 +303,17 @@ public class MnemonicShareKeystoreImportPane extends MnemonicKeystorePane {
         contentBox.setPrefHeight(60);
 
         return contentBox;
+    }
+
+    @Override
+    protected String getPassphraseLabel() {
+        return "Global passphrase:";
+    }
+
+    @Override
+    protected String getPassphraseHelpText() {
+        return "Advanced feature: a passphrase provides optional added security, but it is not stored so it must be remembered!\n" +
+                "The passphrase applies to the reconstructed secret, and not to any individual share.";
     }
 
     public static Glyph getIncompleteGlyph() {

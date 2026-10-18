@@ -6,6 +6,7 @@ import com.sparrowwallet.drongo.crypto.*;
 import com.sparrowwallet.drongo.policy.Policy;
 import com.sparrowwallet.drongo.policy.PolicyType;
 import com.sparrowwallet.drongo.protocol.ScriptType;
+import com.sparrowwallet.drongo.silentpayments.SilentPaymentScanAddress;
 import com.sparrowwallet.drongo.wallet.*;
 import com.sparrowwallet.hummingbird.UR;
 import com.sparrowwallet.hummingbird.registry.*;
@@ -43,8 +44,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static com.sparrowwallet.drongo.OutputDescriptor.KEY_ORIGIN_PATTERN;
+import static com.sparrowwallet.drongo.OutputDescriptor.LEGACY_MULTI_PATTERN;
 import static com.sparrowwallet.drongo.OutputDescriptor.XPUB_PATTERN;
 import static com.sparrowwallet.sparrow.AppServices.showErrorDialog;
 import static com.sparrowwallet.sparrow.AppServices.showWarningDialog;
@@ -118,21 +121,20 @@ public class SettingsController extends WalletFormController implements Initiali
         keystoreTabs = new TabPane();
         keystoreTabsPane.getChildren().add(keystoreTabs);
 
+        policyType.setButtonCell(new PolicyTypeButtonCell());
+        policyType.setCellFactory(_ -> new PolicyTypeListCell());
         policyType.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, policyType) -> {
             walletForm.getWallet().setPolicyType(policyType);
 
             scriptType.setItems(FXCollections.observableArrayList(ScriptType.getAddressableScriptTypes(policyType)));
-            if(!ScriptType.getAddressableScriptTypes(policyType).contains(walletForm.getWallet().getScriptType())) {
-                scriptType.getSelectionModel().select(policyType.getDefaultScriptType());
-            }
-
             if(!initialising) {
+                scriptType.getSelectionModel().select(policyType.getDefaultScriptType());
                 clearKeystoreTabs();
             }
             initialising = false;
 
-            multisigFieldset.setVisible(policyType.equals(PolicyType.MULTI));
-            if(policyType.equals(PolicyType.MULTI)) {
+            multisigFieldset.setVisible(policyType.equals(PolicyType.MULTI_HD));
+            if(policyType.equals(PolicyType.MULTI_HD)) {
                 totalKeystores.bind(multisigControl.highValueProperty());
             } else {
                 totalKeystores.set(1);
@@ -167,7 +169,7 @@ public class SettingsController extends WalletFormController implements Initiali
                             return;
                         } else if(optType.get() == ButtonType.YES) {
                             clearKeystoreTabs();
-                            if(walletForm.getWallet().getPolicyType() == PolicyType.MULTI) {
+                            if(walletForm.getWallet().getPolicyType() == PolicyType.MULTI_HD) {
                                 totalKeystores.bind(multisigControl.highValueProperty());
                             } else {
                                 totalKeystores.set(1);
@@ -177,6 +179,14 @@ public class SettingsController extends WalletFormController implements Initiali
                 }
 
                 walletForm.getWallet().setScriptType(newValue);
+
+                if(oldValue != null && !replacing && !reverting) {
+                    if(multisigControl.getMax() > newValue.getMaxCosigners()) {
+                        multisigControl.setMax(newValue.getMaxCosigners());
+                    } else if(multisigControl.getMax() == multisigControl.getHighValue() && multisigControl.getMax() < newValue.getMaxCosigners()) {
+                        multisigControl.setMax(multisigControl.getMax() + 1.0);
+                    }
+                }
             }
 
             EventManager.get().post(new SettingsChangedEvent(walletForm.getWallet(), SettingsChangedEvent.Type.SCRIPT_TYPE));
@@ -189,7 +199,9 @@ public class SettingsController extends WalletFormController implements Initiali
             EventManager.get().post(new SettingsChangedEvent(walletForm.getWallet(), SettingsChangedEvent.Type.MUTLISIG_THRESHOLD));
         });
         multisigControl.highValueProperty().addListener((observable, oldValue, newValue) -> {
-            if(newValue.doubleValue() == multisigControl.getMax() && newValue.doubleValue() <= 19.0) {
+            ScriptType walletScriptType = walletForm.getWallet().getScriptType();
+            int maxCosigners = walletScriptType == null ? PolicyType.MULTI_HD.getDefaultScriptType().getMaxCosigners() : walletScriptType.getMaxCosigners();
+            if(newValue.doubleValue() == multisigControl.getMax() && newValue.doubleValue() < maxCosigners) {
                 multisigControl.setMax(newValue.doubleValue() + 1.0);
             }
         });
@@ -225,7 +237,7 @@ public class SettingsController extends WalletFormController implements Initiali
                 keystoreTabs.getTabs().remove(keystoreTabs.getTabs().size() - 1);
             }
 
-            if(walletForm.getWallet().getPolicyType().equals(PolicyType.MULTI)) {
+            if(walletForm.getWallet().getPolicyType().equals(PolicyType.MULTI_HD)) {
                 EventManager.get().post(new SettingsChangedEvent(walletForm.getWallet(), SettingsChangedEvent.Type.MULTISIG_TOTAL));
             }
         });
@@ -258,13 +270,16 @@ public class SettingsController extends WalletFormController implements Initiali
             revert.setDisable(true);
             apply.setDisable(true);
             boolean addressChange = ((SettingsWalletForm)walletForm).isAddressChange();
+            if(walletForm.getWallet().getPolicyType() == PolicyType.SINGLE_SP && walletForm.getWallet().getBirthDate() == null && walletForm.getStorage().getEncryptionPubKey() == null) {
+                walletForm.getWallet().setBirthDate(new Date());
+            }
             saveWallet(false, false);
 
             Wallet wallet = walletForm.getWallet();
-            if(wallet.getPolicyType() == PolicyType.MULTI && wallet.getDefaultPolicy().getNumSignaturesRequired() < wallet.getKeystores().size() && addressChange) {
+            if(wallet.getPolicyType() == PolicyType.MULTI_HD && wallet.getDefaultPolicy().getNumSignaturesRequired() < wallet.getKeystores().size() && addressChange) {
                 String outputDescriptor = OutputDescriptor.getOutputDescriptor(wallet, KeyPurpose.DEFAULT_PURPOSES, null).toString(true);
-                CryptoOutput cryptoOutput = getCryptoOutput(wallet);
-                MultisigBackupDialog dialog = new MultisigBackupDialog(wallet, outputDescriptor, cryptoOutput.toUR());
+                RegistryItem registryItem = getUROutputDescriptor(wallet);
+                MultisigBackupDialog dialog = new MultisigBackupDialog(wallet, outputDescriptor, registryItem.toUR());
                 dialog.initOwner(apply.getScene().getWindow());
                 dialog.showAndWait();
             }
@@ -281,7 +296,7 @@ public class SettingsController extends WalletFormController implements Initiali
 
     private void setFieldsFromWallet(Wallet wallet) {
         if(wallet.getPolicyType() == null) {
-            wallet.setPolicyType(PolicyType.SINGLE);
+            wallet.setPolicyType(PolicyType.SINGLE_HD);
             wallet.setScriptType(ScriptType.P2WPKH);
             Keystore keystore = new Keystore("Keystore 1");
             keystore.setSource(KeystoreSource.SW_WATCH);
@@ -290,10 +305,11 @@ public class SettingsController extends WalletFormController implements Initiali
             wallet.setDefaultPolicy(Policy.getPolicy(wallet.getPolicyType(), wallet.getScriptType(), wallet.getKeystores(), 1));
         }
 
-        if(wallet.getPolicyType().equals(PolicyType.SINGLE)) {
+        if(wallet.getPolicyType().equals(PolicyType.SINGLE_HD) || wallet.getPolicyType().equals(PolicyType.SINGLE_SP)) {
             totalKeystores.setValue(1);
-        } else if(wallet.getPolicyType().equals(PolicyType.MULTI)) {
-            multisigControl.setMax(Math.max(multisigControl.getMax(), wallet.getKeystores().size()));
+        } else if(wallet.getPolicyType().equals(PolicyType.MULTI_HD)) {
+            int maxCosigners = wallet.getScriptType() == null ? PolicyType.MULTI_HD.getDefaultScriptType().getMaxCosigners() : wallet.getScriptType().getMaxCosigners();
+            multisigControl.setMax(Math.max(Math.min(maxCosigners, multisigControl.getMax()), wallet.getKeystores().size()));
             multisigControl.highValueProperty().set(wallet.getKeystores().size());
             multisigControl.lowValueProperty().set(wallet.getDefaultPolicy().getNumSignaturesRequired());
             totalKeystores.bind(multisigControl.highValueProperty());
@@ -376,41 +392,54 @@ public class SettingsController extends WalletFormController implements Initiali
         }
 
         OutputDescriptor outputDescriptor = OutputDescriptor.getOutputDescriptor(walletForm.getWallet(), KeyPurpose.DEFAULT_PURPOSES, null);
-        CryptoOutput cryptoOutput = getCryptoOutput(walletForm.getWallet());
-        if(cryptoOutput == null) {
+        RegistryItem registryItem = getUROutputDescriptor(walletForm.getWallet());
+        if(registryItem == null) {
             AppServices.showErrorDialog("Unsupported Wallet Policy", "Cannot show a descriptor for this wallet.");
             return;
         }
 
         boolean addBbqrOption = walletForm.getWallet().getKeystores().stream().anyMatch(keystore -> keystore.getWalletModel().showBbqr());
-        boolean selectBbqrOption = walletForm.getWallet().getKeystores().stream().allMatch(keystore -> keystore.getWalletModel().selectBbqr());
+        QREncoding encoding = walletForm.getWallet().getKeystores().stream().allMatch(keystore -> keystore.getWalletModel().selectBbqr()) ? QREncoding.BBQR : QREncoding.UR;
 
-        UR cryptoOutputUR = cryptoOutput.toUR();
+        UR cryptoOutputUR = registryItem.toUR();
         BBQR bbqr = addBbqrOption ? new BBQR(BBQRType.UNICODE, outputDescriptor.toString(true).getBytes(StandardCharsets.UTF_8)) : null;
-        QRDisplayDialog qrDisplayDialog = new DescriptorQRDisplayDialog(walletForm.getWallet().getFullDisplayName(), outputDescriptor.toString(true), cryptoOutputUR, bbqr, selectBbqrOption);
+        QRDisplayDialog qrDisplayDialog = new DescriptorQRDisplayDialog(walletForm.getWallet().getFullDisplayName(), outputDescriptor.toString(true), cryptoOutputUR, bbqr, encoding);
         qrDisplayDialog.initOwner(showDescriptorQR.getScene().getWindow());
         qrDisplayDialog.showAndWait();
     }
 
-    public static CryptoOutput getCryptoOutput(Wallet wallet) {
+    public static RegistryItem getUROutputDescriptor(Wallet wallet) {
         List<ScriptExpression> scriptExpressions = getScriptExpressions(wallet.getScriptType());
 
-        CryptoOutput cryptoOutput = null;
-        if(wallet.getPolicyType() == PolicyType.SINGLE) {
-            cryptoOutput = new CryptoOutput(scriptExpressions, getCryptoHDKey(wallet.getKeystores().get(0)));
-        } else if(wallet.getPolicyType() == PolicyType.MULTI) {
+        RegistryItem registryItem = null;
+        if(wallet.getPolicyType() == PolicyType.SINGLE_HD) {
+            Keystore keystore = wallet.getKeystores().getFirst();
+            KeyDerivation keyDerivation = keystore.getKeyDerivation();
+            registryItem = new CryptoOutput(scriptExpressions, getCryptoHDKey(keyDerivation.getMasterFingerprint(), keyDerivation.getDerivation(), keystore.getExtendedPublicKey(), keystore.getLabel()));
+        } else if(wallet.getPolicyType() == PolicyType.MULTI_HD) {
             WalletNode firstReceive = new WalletNode(wallet, KeyPurpose.RECEIVE, 0);
             Utils.LexicographicByteArrayComparator lexicographicByteArrayComparator = new Utils.LexicographicByteArrayComparator();
             List<CryptoHDKey> cryptoHDKeys = wallet.getKeystores().stream().sorted((keystore1, keystore2) -> {
                 return lexicographicByteArrayComparator.compare(keystore1.getPubKey(firstReceive).getPubKey(), keystore2.getPubKey(firstReceive).getPubKey());
-            }).map(SettingsController::getCryptoHDKey).collect(Collectors.toList());
+            }).map(keystore -> {
+                KeyDerivation keyDerivation = keystore.getKeyDerivation();
+                return getCryptoHDKey(keyDerivation.getMasterFingerprint(), keyDerivation.getDerivation(), keystore.getExtendedPublicKey(), keystore.getLabel());
+            }).collect(Collectors.toList());
             MultiKey multiKey = new MultiKey(wallet.getDefaultPolicy().getNumSignaturesRequired(), null, cryptoHDKeys);
             List<ScriptExpression> multiScriptExpressions = new ArrayList<>(scriptExpressions);
             multiScriptExpressions.add(ScriptExpression.SORTED_MULTISIG);
-            cryptoOutput = new CryptoOutput(multiScriptExpressions, multiKey);
+            registryItem = new CryptoOutput(multiScriptExpressions, multiKey);
+        } else if(wallet.getPolicyType() == PolicyType.SINGLE_SP) {
+            Keystore keystore = wallet.getKeystores().getFirst();
+            KeyDerivation keyDerivation = keystore.getKeyDerivation();
+            SilentPaymentScanAddress spScanAddress = keystore.getSilentPaymentScanAddress();
+            URHDKey scanKey = getURHDKey(keyDerivation.getMasterFingerprint(), KeyDerivation.getBip352ScanDerivation(keyDerivation.getDerivation()), spScanAddress.getScanKey(), keystore.getLabel());
+            URHDKey spendKey = getURHDKey(keyDerivation.getMasterFingerprint(), KeyDerivation.getBip352SpendDerivation(keyDerivation.getDerivation()), spScanAddress.getSpendKey(), keystore.getLabel());
+            String annotations = wallet.getBirthHeight() != null ? "?" + OutputDescriptor.ANNOTATION_BLOCK_HEIGHT + "=" + wallet.getBirthHeight() : "";
+            registryItem = new UROutputDescriptor("sp(@0,@1)" + annotations, List.of(scanKey, spendKey), wallet.getFullDisplayName(), null);
         }
 
-        return cryptoOutput;
+        return registryItem;
     }
 
     private static List<ScriptExpression> getScriptExpressions(ScriptType scriptType) {
@@ -435,12 +464,18 @@ public class SettingsController extends WalletFormController implements Initiali
         throw new IllegalArgumentException("Unknown script type of " + scriptType);
     }
 
-    private static CryptoHDKey getCryptoHDKey(Keystore keystore) {
-        ExtendedKey extendedKey = keystore.getExtendedPublicKey();
+    private static CryptoHDKey getCryptoHDKey(String masterFingerprint, List<ChildNumber> derivation, ExtendedKey extendedKey, String label) {
         CryptoCoinInfo cryptoCoinInfo = new CryptoCoinInfo(CryptoCoinInfo.Type.BITCOIN.ordinal(), Network.get() == Network.MAINNET ? CryptoCoinInfo.Network.MAINNET.ordinal() : CryptoCoinInfo.Network.TESTNET.ordinal());
-        List<PathComponent> pathComponents = keystore.getKeyDerivation().getDerivation().stream().map(cNum -> new IndexPathComponent(cNum.num(), cNum.isHardened())).collect(Collectors.toList());
-        CryptoKeypath cryptoKeypath = new CryptoKeypath(pathComponents, Utils.hexToBytes(keystore.getKeyDerivation().getMasterFingerprint()), pathComponents.size());
-        return new CryptoHDKey(false, extendedKey.getKey().getPubKey(), extendedKey.getKey().getChainCode(), cryptoCoinInfo, cryptoKeypath, null, extendedKey.getParentFingerprint(), keystore.getLabel(), null);
+        List<PathComponent> pathComponents = derivation.stream().map(cNum -> new IndexPathComponent(cNum.num(), cNum.isHardened())).collect(Collectors.toList());
+        CryptoKeypath cryptoKeypath = new CryptoKeypath(pathComponents, Utils.hexToBytes(masterFingerprint), pathComponents.size());
+        return new CryptoHDKey(false, extendedKey.getKey().getPubKey(), extendedKey.getKey().getChainCode(), cryptoCoinInfo, cryptoKeypath, null, extendedKey.getParentFingerprint(), label, null);
+    }
+
+    private static URHDKey getURHDKey(String masterFingerprint, List<ChildNumber> derivation, ECKey key, String label) {
+        URCoinInfo cryptoCoinInfo = new URCoinInfo(URCoinInfo.Type.BITCOIN.ordinal(), Network.get() == Network.MAINNET ? URCoinInfo.Network.MAINNET.ordinal() : URCoinInfo.Network.TESTNET.ordinal());
+        List<PathComponent> pathComponents = derivation.stream().map(cNum -> new IndexPathComponent(cNum.num(), cNum.isHardened())).collect(Collectors.toList());
+        URKeypath cryptoKeypath = new URKeypath(pathComponents, Utils.hexToBytes(masterFingerprint), pathComponents.size());
+        return new URHDKey(key.hasPrivKey(), key.hasPrivKey() ? key.getPrivKeyBytes() : key.getPubKey(), null, cryptoCoinInfo, cryptoKeypath, null, null, label, null);
     }
 
     public void editDescriptor(ActionEvent event) {
@@ -451,10 +486,10 @@ public class SettingsController extends WalletFormController implements Initiali
         dialog.initOwner(editDescriptor.getScene().getWindow());
         dialog.setTitle("Edit wallet output descriptor");
         dialog.getDialogPane().setHeaderText("The wallet configuration is specified in the output descriptor.\nChanges to the output descriptor will modify the wallet configuration." +
-                (walletForm.getWallet().getPolicyType() == PolicyType.MULTI ? "\nKey expressions are shown in canonical order." : ""));
+                (walletForm.getWallet().getPolicyType() == PolicyType.MULTI_HD ? "\nKey expressions are shown in canonical order." : ""));
         Optional<String> text = dialog.showAndWait();
         if(text.isPresent() && !text.get().isEmpty() && !text.get().equals(outputDescriptorString)) {
-            if(text.get().contains("(multi(")) {
+            if(LEGACY_MULTI_PATTERN.matcher(text.get()).find()) {
                 AppServices.showWarningDialog("Legacy multisig wallet detected", "Sparrow supports BIP67 compatible multisig wallets only.\n\nThe public keys will be lexicographically sorted, and the output descriptor represented with sortedmulti.");
             }
 
@@ -498,6 +533,12 @@ public class SettingsController extends WalletFormController implements Initiali
             return;
         }
 
+        if(editedWallet.getScriptType() != null && editedWallet.getKeystores().size() > editedWallet.getScriptType().getMaxCosigners()) {
+            AppServices.showErrorDialog("Too Many Cosigners", "The provided output descriptor has " + editedWallet.getKeystores().size() + " cosigners, but " +
+                    editedWallet.getScriptType().getName() + " supports a maximum of " + editedWallet.getScriptType().getMaxCosigners() + ".");
+            return;
+        }
+
         if(AppServices.disallowAnyInvalidDerivationPaths(editedWallet)) {
             return;
         }
@@ -514,6 +555,7 @@ public class SettingsController extends WalletFormController implements Initiali
                 keystore.setWalletModel(existing.getWalletModel());
                 if(existing.getKeyDerivation().getDerivation().equals(keystore.getKeyDerivation().getDerivation())) {
                     keystore.setExtendedPublicKey(existing.getExtendedPublicKey());
+                    keystore.setSilentPaymentScanAddress(existing.getSilentPaymentScanAddress());
                 } else {
                     rederive = true;
                 }
@@ -550,7 +592,6 @@ public class SettingsController extends WalletFormController implements Initiali
                     log.error("Error restoring public keys from seed", e);
                 } finally {
                     key.clear();
-                    encryptionFullKey.clear();
                     password.get().clear();
                 }
             });
@@ -573,6 +614,7 @@ public class SettingsController extends WalletFormController implements Initiali
     private void replaceWallet(Wallet editedWallet) {
         editedWallet.setName(getWalletForm().getWallet().getName());
         editedWallet.setBirthDate(getWalletForm().getWallet().getBirthDate());
+        editedWallet.setBirthHeight(getWalletForm().getWallet().getBirthHeight());
         editedWallet.setGapLimit(getWalletForm().getWallet().getGapLimit());
         editedWallet.setWatchLast(getWalletForm().getWallet().getWatchLast());
         editedWallet.setMasterWallet(getWalletForm().getWallet().getMasterWallet());
@@ -597,7 +639,7 @@ public class SettingsController extends WalletFormController implements Initiali
         dialog.initOwner(showDescriptor.getScene().getWindow());
         dialog.setTitle("Show wallet output descriptor");
         dialog.getDialogPane().setHeaderText("The wallet configuration is specified in the output descriptor.\nThis wallet is no longer editable - create a new wallet to change the descriptor." +
-                (walletForm.getWallet().getPolicyType() == PolicyType.MULTI ? "\nKey expressions are shown in canonical order." : ""));
+                (walletForm.getWallet().getPolicyType() == PolicyType.MULTI_HD ? "\nKey expressions are shown in canonical order." : ""));
         dialog.showAndWait();
     }
 
@@ -656,7 +698,6 @@ public class SettingsController extends WalletFormController implements Initiali
                         EventManager.get().post(new StorageEvent(walletId, TimedEvent.Action.END, "Done"));
                         ECKey encryptionFullKey = keyDerivationService.getValue();
                         Key key = new Key(encryptionFullKey.getPrivKeyBytes(), walletForm.getStorage().getKeyDeriver().getSalt(), EncryptionType.Deriver.ARGON2);
-                        encryptionFullKey.clear();
                         masterWallet.decrypt(key);
 
                         if(masterWallet.getKeystores().stream().anyMatch(ks -> ks.getSource() != KeystoreSource.SW_SEED)) {
@@ -724,7 +765,7 @@ public class SettingsController extends WalletFormController implements Initiali
                 }
             }
         } else {
-            if(discoverAccounts && masterWallet.getKeystores().size() == 1 && masterWallet.getKeystores().stream().allMatch(ks -> ks.getSource() == KeystoreSource.HW_USB)) {
+            if(discoverAccounts && masterWallet.getPolicyType() == PolicyType.SINGLE_HD && masterWallet.getKeystores().stream().allMatch(ks -> ks.getSource() == KeystoreSource.HW_USB)) {
                 String fingerprint = masterWallet.getKeystores().get(0).getKeyDerivation().getMasterFingerprint();
                 DeviceKeystoreDiscoverDialog deviceKeystoreDiscoverDialog = new DeviceKeystoreDiscoverDialog(List.of(fingerprint), masterWallet, standardAccounts);
                 deviceKeystoreDiscoverDialog.initOwner(addAccount.getScene().getWindow());
@@ -827,9 +868,9 @@ public class SettingsController extends WalletFormController implements Initiali
     public void update(SettingsChangedEvent event) {
         Wallet wallet = event.getWallet();
         if(walletForm.getWallet().equals(wallet)) {
-            if(wallet.getPolicyType() == PolicyType.SINGLE) {
+            if(wallet.getPolicyType() == PolicyType.SINGLE_HD || wallet.getPolicyType() == PolicyType.SINGLE_SP) {
                 wallet.setDefaultPolicy(Policy.getPolicy(wallet.getPolicyType(), wallet.getScriptType(), wallet.getKeystores(), 1));
-            } else if(wallet.getPolicyType() == PolicyType.MULTI) {
+            } else if(wallet.getPolicyType() == PolicyType.MULTI_HD) {
                 wallet.setDefaultPolicy(Policy.getPolicy(wallet.getPolicyType(), wallet.getScriptType(), wallet.getKeystores(), (int)multisigControl.getLowValue()));
             }
 
@@ -857,20 +898,23 @@ public class SettingsController extends WalletFormController implements Initiali
     @Subscribe
     public void walletAddressesChanged(WalletAddressesChangedEvent event) {
         if(event.getWalletId().equals(walletForm.getWalletId())) {
-            updateBirthDate(event.getWallet());
+            updateBirth(event.getWallet());
         }
     }
 
     @Subscribe
     public void walletHistoryChanged(WalletHistoryChangedEvent event) {
         if(event.getWalletId().equals(walletForm.getWalletId())) {
-            updateBirthDate(event.getWallet());
+            updateBirth(event.getWallet());
         }
     }
 
-    private void updateBirthDate(Wallet wallet) {
+    private void updateBirth(Wallet wallet) {
         if(!Objects.equals(wallet.getBirthDate(), walletForm.getWallet().getBirthDate())) {
             walletForm.getWallet().setBirthDate(wallet.getBirthDate());
+        }
+        if(!Objects.equals(wallet.getBirthHeight(), walletForm.getWallet().getBirthHeight())) {
+            walletForm.getWallet().setBirthHeight(wallet.getBirthHeight());
         }
     }
 
@@ -898,31 +942,93 @@ public class SettingsController extends WalletFormController implements Initiali
     @Subscribe
     public void existingWalletImported(ExistingWalletImportedEvent event) {
         if(event.getExistingWalletId().equals(getWalletForm().getWalletId())) {
-            List<Keystore> importedKeystores = event.getImportedWallet().getKeystores();
+            Wallet importedWallet = event.getImportedWallet();
+            List<Keystore> importedKeystores = importedWallet.getKeystores();
             List<Keystore> nonWatchKeystores = walletForm.getWallet().getKeystores().stream().filter(k -> k.isValid() && k.getSource() != KeystoreSource.SW_WATCH).collect(Collectors.toList());
+
+            //BIP129 requires a signer to verify its own key is present in the imported descriptor by an exact match, and not by a shortcut such as the master fingerprint
+            Map<Integer, Keystore> ownKeystores = new LinkedHashMap<>();
+            List<Keystore> absentKeystores = new ArrayList<>();
             for(Keystore nonWatchKeystore : nonWatchKeystores) {
-                Optional<Keystore> optReplacedKeystore = importedKeystores.stream().filter(k -> nonWatchKeystore.getExtendedPublicKey().equals(k.getExtendedPublicKey())).findFirst();
-                if(optReplacedKeystore.isPresent()) {
-                    int index = importedKeystores.indexOf(optReplacedKeystore.get());
-                    importedKeystores.remove(index);
-                    importedKeystores.add(index, nonWatchKeystore);
+                int index = IntStream.range(0, importedKeystores.size())
+                        .filter(i -> Objects.equals(nonWatchKeystore.getExtendedPublicKey(), importedKeystores.get(i).getExtendedPublicKey())).findFirst().orElse(-1);
+                if(index >= 0) {
+                    ownKeystores.put(index, nonWatchKeystore);
+                } else {
+                    absentKeystores.add(nonWatchKeystore);
                 }
             }
 
-            replaceWallet(event.getImportedWallet());
+            if(AppServices.disallowAnyInvalidDerivationPaths(importedWallet)) {
+                return;
+            }
+
+            try {
+                importedWallet.checkWallet();
+            } catch(InvalidWalletException e) {
+                showErrorDialog("Error Importing Wallet", "The imported wallet is not valid: " + e.getMessage());
+                return;
+            }
+
+            if(!confirmImportedPolicy(importedWallet, ownKeystores.keySet(), absentKeystores)) {
+                return;
+            }
+
+            //Substituted only once the import is accepted, so the current wallet is untouched if it is not. Cosigners of the same model share a label, and the coordinator has
+            //already made those unique, so the label of the replaced cosigner is taken rather than the local one - which would often duplicate another cosigner's label.
+            ownKeystores.forEach((index, ownKeystore) -> {
+                ownKeystore.setLabel(importedKeystores.get(index).getLabel());
+                importedKeystores.set(index, ownKeystore);
+            });
+
+            replaceWallet(importedWallet);
         }
     }
 
-    private void saveWallet(boolean changePassword, boolean suggestChangePassword) {
+    //The imported policy, cosigners and the position of the user's own keys are adopted wholesale, so BIP129 requires the signer be shown them before they are
+    private boolean confirmImportedPolicy(Wallet importedWallet, Set<Integer> ownIndexes, List<Keystore> absentKeystores) {
+        List<Keystore> importedKeystores = importedWallet.getKeystores();
+        int threshold = importedWallet.getDefaultPolicy().getNumSignaturesRequired();
+
+        StringBuilder content = new StringBuilder("This import completes the configuration of ").append(walletForm.getWallet().getFullDisplayName()).append(".\n\n");
+        content.append("Quorum: ").append(threshold).append(" of ").append(importedKeystores.size());
+        int configuredThreshold = (int)multisigControl.getLowValue();
+        int configuredCosigners = (int)multisigControl.getHighValue();
+        if(threshold != configuredThreshold || importedKeystores.size() != configuredCosigners) {
+            content.append(", replacing the ").append(configuredThreshold).append(" of ").append(configuredCosigners).append(" configured here");
+        }
+        content.append("\n\n");
+
+        for(int i = 0; i < importedKeystores.size(); i++) {
+            Keystore keystore = importedKeystores.get(i);
+            KeyDerivation keyDerivation = keystore.getKeyDerivation();
+            content.append("Cosigner ").append(i + 1).append(": ").append(keystore.getLabel());
+            content.append(" [").append(keyDerivation.getMasterFingerprint()).append(KeyDerivation.writePath(keyDerivation.getDerivation()).substring(1)).append("]");
+            if(ownIndexes.contains(i)) {
+                content.append(" - your keystore");
+            }
+            content.append("\n");
+        }
+
+        for(Keystore absentKeystore : absentKeystores) {
+            content.append("\nThe keystore ").append(absentKeystore.getLabel()).append(" configured here is not present in this import and will be removed. You will not be able to sign with it.\n");
+        }
+
+        content.append("\nVerify the quorum and the cosigner key origins above against those provided by the coordinator before applying.");
+
+        Optional<ButtonType> optResponse = showWarningDialog("Complete Multisig Wallet?", content.toString(), ButtonType.CANCEL, ButtonType.OK);
+        return optResponse.isPresent() && optResponse.get() == ButtonType.OK;
+    }
+
+    //Returns true if the wallet save was initiated, and false if it was abandoned without any change to the wallet or its storage
+    private boolean saveWallet(boolean changePassword, boolean suggestChangePassword) {
         ECKey existingPubKey = walletForm.getStorage().getEncryptionPubKey();
 
         WalletPasswordDialog.PasswordRequirement requirement;
-        if(existingPubKey == null) {
-            if(changePassword) {
-                requirement = WalletPasswordDialog.PasswordRequirement.UPDATE_CHANGE;
-            } else {
-                requirement = WalletPasswordDialog.PasswordRequirement.UPDATE_NEW;
-            }
+        if(changePassword) {
+            requirement = WalletPasswordDialog.PasswordRequirement.UPDATE_CHANGE;
+        } else if(existingPubKey == null) {
+            requirement = WalletPasswordDialog.PasswordRequirement.UPDATE_NEW;
         } else if(Storage.NO_PASSWORD_KEY.equals(existingPubKey)) {
             requirement = WalletPasswordDialog.PasswordRequirement.UPDATE_EMPTY;
         } else {
@@ -934,13 +1040,18 @@ public class SettingsController extends WalletFormController implements Initiali
             if(optResponse.isPresent() && optResponse.get().equals(ButtonType.CANCEL)) {
                 revert.setDisable(false);
                 apply.setDisable(false);
-                return;
+                return false;
             }
         }
 
         WalletPasswordDialog dlg = new WalletPasswordDialog(null, requirement, suggestChangePassword);
         dlg.initOwner(apply.getScene().getWindow());
-        Optional<SecureString> password = dlg.showAndWait();
+        Optional<SecureString> password = walletForm.isLocked() ? Optional.empty() : dlg.showAndWait();
+        if(password.isPresent() && walletForm.isLocked()) {
+            AppServices.showErrorDialog("Wallet Locked", "The wallet was locked before the password was entered. Unlock the wallet and apply the change again.");
+            password = Optional.empty();
+        }
+
         if(password.isPresent()) {
             if(dlg.isBackupExisting()) {
                 try {
@@ -950,7 +1061,7 @@ public class SettingsController extends WalletFormController implements Initiali
                     AppServices.showErrorDialog("Error saving wallet backup", e.getMessage());
                     revert.setDisable(false);
                     apply.setDisable(false);
-                    return;
+                    return false;
                 }
             }
 
@@ -975,7 +1086,8 @@ public class SettingsController extends WalletFormController implements Initiali
                     try {
                         ECKey encryptionPubKey = ECKey.fromPublicOnly(encryptionFullKey);
 
-                        if(existingPubKey != null && !Storage.NO_PASSWORD_KEY.equals(existingPubKey) && !existingPubKey.equals(encryptionPubKey)) {
+                        //When changing the password, the existing encryption key is retained until the new one is derived, so a different key is expected here
+                        if(!changePassword && existingPubKey != null && !Storage.NO_PASSWORD_KEY.equals(existingPubKey) && !existingPubKey.equals(encryptionPubKey)) {
                             AppServices.showErrorDialog("Incorrect Password", "The password was incorrect.");
                             revert.setDisable(false);
                             apply.setDisable(false);
@@ -990,14 +1102,22 @@ public class SettingsController extends WalletFormController implements Initiali
                                 walletForm.deleteBackups();
                             }
 
-                            walletForm.getStorage().setEncryptionPubKey(null);
                             masterWallet.decrypt(key);
                             for(Wallet childWallet : masterWallet.getChildWallets()) {
                                 if(!childWallet.isNested()) {
                                     childWallet.decrypt(key);
                                 }
                             }
-                            saveWallet(true, false);
+
+                            //If a new password is not provided, re-encrypt with the existing key rather than leaving the wallet decrypted for the session
+                            if(!saveWallet(true, false)) {
+                                masterWallet.encrypt(key);
+                                for(Wallet childWallet : masterWallet.getChildWallets()) {
+                                    if(!childWallet.isNested()) {
+                                        childWallet.encrypt(key);
+                                    }
+                                }
+                            }
                             return;
                         }
 
@@ -1020,7 +1140,6 @@ public class SettingsController extends WalletFormController implements Initiali
                         revert.setDisable(false);
                         apply.setDisable(false);
                     } finally {
-                        encryptionFullKey.clear();
                         if(key != null) {
                             key.clear();
                         }
@@ -1035,9 +1154,42 @@ public class SettingsController extends WalletFormController implements Initiali
                 EventManager.get().post(new StorageEvent(walletForm.getWalletId(), TimedEvent.Action.START, "Encrypting wallet..."));
                 keyDerivationService.start();
             }
+
+            return true;
         } else {
             revert.setDisable(false);
             apply.setDisable(false);
+            return false;
+        }
+    }
+
+    private static class PolicyTypeButtonCell extends ListCell<PolicyType> {
+        @Override
+        protected void updateItem(PolicyType policyType, boolean empty) {
+            super.updateItem(policyType, empty);
+            if(policyType == null || empty) {
+                setText("");
+                setGraphic(null);
+            } else {
+                setText(policyType.getName());
+                setGraphic(null);
+                setGraphicTextGap(8.0d);
+            }
+        }
+    }
+
+    private static class PolicyTypeListCell extends ListCell<PolicyType> {
+        @Override
+        protected void updateItem(PolicyType policyType, boolean empty) {
+            super.updateItem(policyType, empty);
+            if(policyType == null || empty) {
+                setText("");
+                setGraphic(null);
+            } else {
+                setText(policyType.getDescription());
+                setGraphic(null);
+                setGraphicTextGap(8.0d);
+            }
         }
     }
 }

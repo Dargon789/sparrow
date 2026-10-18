@@ -188,10 +188,18 @@ public class InputController extends TransactionFormController implements Initia
     }
 
     private void updateOutpoint(Map<Sha256Hash, BlockTransaction> inputTransactions) {
+        TransactionInput txInput = inputForm.getTransactionInput();
+        BlockTransaction fetchedTransaction = inputTransactions.get(txInput.getOutpoint().getHash());
+        if(fetchedTransaction != null && fetchedTransaction.getTransaction() == null) {
+            outpoint.setVisible(true);
+            linkedOutpoint.setVisible(false);
+            outpoint.setText(txInput.getOutpoint().getHash().toString() + ":" + txInput.getOutpoint().getIndex());
+            return;
+        }
+
         outpoint.setVisible(false);
         linkedOutpoint.setVisible(true);
 
-        TransactionInput txInput = inputForm.getTransactionInput();
         linkedOutpoint.setText(txInput.getOutpoint().getHash().toString() + ":" + txInput.getOutpoint().getIndex());
         linkedOutpoint.setOnAction(event -> {
             BlockTransaction linkedTransaction = inputTransactions.get(txInput.getOutpoint().getHash());
@@ -204,6 +212,10 @@ public class InputController extends TransactionFormController implements Initia
         TransactionInput txInput = inputForm.getTransactionInput();
         if(!txInput.isCoinBase()) {
             BlockTransaction blockTransaction = inputTransactions.get(txInput.getOutpoint().getHash());
+            if(blockTransaction != null && blockTransaction.getTransaction() == null) {
+                return;
+            }
+
             if(blockTransaction == null) {
                 if(inputForm.getIndex() < inputForm.getMaxInputFetched()) {
                     throw new IllegalStateException("Could not retrieve block transaction for input #" + inputForm.getIndex());
@@ -330,14 +342,14 @@ public class InputController extends TransactionFormController implements Initia
                 if(txInput.isAbsoluteTimeLockDisabled()) {
                     locktimeToggleGroup.selectToggle(locktimeAbsoluteType);
                 } else if(txInput.isAbsoluteTimeLocked()) {
-                    txInput.setSequenceNumber(TransactionInput.SEQUENCE_RBF_ENABLED);
+                    setInputSequenceNumber(txInput, TransactionInput.SEQUENCE_RBF_ENABLED);
                     if(oldValue != null) {
                         EventManager.get().post(new TransactionChangedEvent(transaction));
                     }
                 }
             } else {
                 if(txInput.isAbsoluteTimeLocked()) {
-                    txInput.setSequenceNumber(TransactionInput.SEQUENCE_RBF_DISABLED);
+                    setInputSequenceNumber(txInput, TransactionInput.SEQUENCE_RBF_DISABLED);
                     if(oldValue != null) {
                         EventManager.get().post(new TransactionChangedEvent(transaction));
                     }
@@ -366,6 +378,13 @@ public class InputController extends TransactionFormController implements Initia
         }
     }
 
+    private void setInputSequenceNumber(TransactionInput txInput, long sequence) {
+        txInput.setSequenceNumber(sequence);
+        if(inputForm.getPsbtInput() != null) {
+            inputForm.getPsbtInput().setSequence(sequence);
+        }
+    }
+
     private void initializeLocktimeFields(TransactionInput txInput) {
         Transaction transaction = inputForm.getTransaction();
         locktimeToggleGroup.selectedToggleProperty().addListener((ov, old_toggle, new_toggle) -> {
@@ -376,7 +395,7 @@ public class InputController extends TransactionFormController implements Initia
                     locktimeFieldset.getChildren().add(locktimeAbsoluteField);
                     updateAbsoluteLocktimeField(transaction);
                     locktimeAbsoluteField.setDisable(true);
-                    txInput.setSequenceNumber(TransactionInput.SEQUENCE_LOCKTIME_DISABLED);
+                    setInputSequenceNumber(txInput, TransactionInput.SEQUENCE_LOCKTIME_DISABLED);
                     rbf.setSelected(false);
                     if(old_toggle != null) {
                         EventManager.get().post(new TransactionChangedEvent(transaction));
@@ -387,9 +406,9 @@ public class InputController extends TransactionFormController implements Initia
                     updateAbsoluteLocktimeField(transaction);
                     locktimeAbsoluteField.setDisable(false);
                     if(rbf.selectedProperty().getValue()) {
-                        txInput.setSequenceNumber(TransactionInput.SEQUENCE_RBF_ENABLED);
+                        setInputSequenceNumber(txInput, TransactionInput.SEQUENCE_RBF_ENABLED);
                     } else {
-                        txInput.setSequenceNumber(TransactionInput.SEQUENCE_RBF_DISABLED);
+                        setInputSequenceNumber(txInput, TransactionInput.SEQUENCE_RBF_DISABLED);
                     }
                     if(old_toggle != null) {
                         EventManager.get().post(new TransactionChangedEvent(transaction));
@@ -468,10 +487,10 @@ public class InputController extends TransactionFormController implements Initia
         String relativeSelection = locktimeRelativeCombo.getValue();
         if(relativeSelection.equals("blocks")) {
             Integer value = locktimeRelativeBlocks.getValue();
-            txInput.setSequenceNumber(value & TransactionInput.RELATIVE_TIMELOCK_VALUE_MASK);
+            setInputSequenceNumber(txInput, value & TransactionInput.RELATIVE_TIMELOCK_VALUE_MASK);
         } else {
             long value = locktimeRelativeSeconds.getValue().toSeconds() / TransactionInput.RELATIVE_TIMELOCK_SECONDS_INCREMENT;
-            txInput.setSequenceNumber((value & TransactionInput.RELATIVE_TIMELOCK_VALUE_MASK) | TransactionInput.RELATIVE_TIMELOCK_TYPE_FLAG);
+            setInputSequenceNumber(txInput, (value & TransactionInput.RELATIVE_TIMELOCK_VALUE_MASK) | TransactionInput.RELATIVE_TIMELOCK_TYPE_FLAG);
         }
         if(changed) {
             EventManager.get().post(new TransactionChangedEvent(transaction));

@@ -58,7 +58,7 @@ public class MnemonicKeystoreImportPane extends MnemonicKeystorePane {
         importButton = new SplitMenuButton();
         importButton.setAlignment(Pos.CENTER_RIGHT);
         importButton.setText("Import Keystore");
-        importButton.getStyleClass().add("default-button");
+        setDefaultButton(importButton);
         importButton.setOnAction(event -> {
             importButton.setDisable(true);
             importKeystore(getDefaultDerivation(), false);
@@ -141,7 +141,7 @@ public class MnemonicKeystoreImportPane extends MnemonicKeystorePane {
     protected void onWordChange(boolean empty, boolean validWords, boolean validChecksum) {
         if(!empty && validWords) {
             try {
-                importer.getKeystore(wallet.getScriptType().getDefaultDerivation(), wordEntriesProperty.get(), passphraseProperty.get());
+                importer.getKeystore(wallet.getPolicyType(), wallet.getScriptType().getDefaultDerivation(), wordEntriesProperty.get(), passphraseProperty.get());
                 validChecksum = true;
             } catch(ImportException e) {
                 if(e.getCause() instanceof MnemonicException.MnemonicTypeException) {
@@ -168,6 +168,8 @@ public class MnemonicKeystoreImportPane extends MnemonicKeystorePane {
         try {
             secureRandom = SecureRandom.getInstanceStrong();
         } catch(NoSuchAlgorithmException e) {
+            //Not a fallback to a weaker source: both resolve to the SUN provider and the same java.base implementation seeded from the OS CSPRNG
+            //This branch is in any case unreachable, since securerandom.strongAlgorithms specifies DRBG:SUN, always present in the bundled runtime - see #2040
             secureRandom = new SecureRandom();
         }
 
@@ -256,7 +258,7 @@ public class MnemonicKeystoreImportPane extends MnemonicKeystorePane {
     private boolean importKeystore(List<ChildNumber> derivation, boolean dryrun) {
         importButton.setDisable(true);
         try {
-            Keystore keystore = importer.getKeystore(derivation, wordEntriesProperty.get(), passphraseProperty.get());
+            Keystore keystore = importer.getKeystore(wallet.getPolicyType(), derivation, wordEntriesProperty.get(), passphraseProperty.get());
             if(!dryrun) {
                 if(passphraseProperty.get() != null && !passphraseProperty.get().isEmpty()) {
                     KeystorePassphraseDialog keystorePassphraseDialog = new KeystorePassphraseDialog(null, keystore, true);
